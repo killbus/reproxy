@@ -7,3 +7,10 @@
 # picking either side (task state lives in task.json, not index.md). See
 # .trellis/spec/cli/backend/directory-structure.md for details.
 .trellis/workspace/*/journal-*.md merge=union
+
+# Go source must check out as LF everywhere: gofmt rejects CRLF, and
+# Windows runners default autocrlf would otherwise break the CI gofmt
+# gate. Applies to checkout only — the blobs in the index are already LF.
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
