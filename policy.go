@@ -438,10 +438,12 @@ func parseStatusCode(s string) (int, *RequestError) {
 	return n, nil
 }
 
-// parseNetworkGate parses retry.network: only "0" and "1" are accepted.
+// parseNetworkGate parses retry.network: only "0" and "1" are accepted (a
+// valueless or empty key is a client error — fail closed on invalid values,
+// matching the documented contract).
 func parseNetworkGate(value string) (bool, *RequestError) {
 	switch value {
-	case "1", "":
+	case "1":
 		return true, nil
 	case "0":
 		return false, nil

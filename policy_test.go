@@ -287,6 +287,14 @@ func TestParseNetworkGate(t *testing.T) {
 	if !parseForTest(t, url.Values{}).NetworkGate {
 		t.Errorf("NetworkGate default = false, want true")
 	}
+	// A valueless or empty value is a client error (fail closed): the
+	// documented contract accepts only "0" or "1".
+	for _, bad := range []string{"", "true", "on"} {
+		_, err := Parse(params("retry.network", bad), NewDefaultConfig())
+		if err == nil || err.Code != 400 {
+			t.Fatalf("retry.network=%q should be a 400, got %v", bad, err)
+		}
+	}
 	_, err := Parse(params("retry.network", "2"), NewDefaultConfig())
 	if err == nil || err.Code != 400 {
 		t.Fatalf("retry.network=2 should be a 400, got %v", err)

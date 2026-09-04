@@ -309,6 +309,7 @@ func (p *Proxy) attemptLoop(
 				// lastErr already names the network failure).
 				break
 			}
+			p.logLine("wait", fmt.Sprintf("target=%s backoff=%s", target.HostPort(), wait.Round(time.Millisecond)))
 			if !p.sleepCtx(r.Context(), wait) {
 				return
 			}
@@ -337,6 +338,7 @@ func (p *Proxy) attemptLoop(
 			p.drainAndClose(resp)
 			cancel()
 			p.logAttempt(target, attemptNo, resp.StatusCode, "retryable status", remaining(), attempts, limit)
+			p.logLine("wait", fmt.Sprintf("target=%s backoff=%s", target.HostPort(), wait.Round(time.Millisecond)))
 			if !p.sleepCtx(r.Context(), wait) {
 				return
 			}
@@ -452,13 +454,18 @@ func (p *Proxy) roundTrip(
 		return res.resp, cancel, nil
 	case <-timer.C:
 		// TTFB exceeded: cancel the attempt, then wait for the goroutine to
-		// observe it so no result is leaked.
+		// observe it so no result is leaked. If the transport nevertheless
+		// delivered a response concurrently with the timer, its body must be
+		// closed — otherwise the pooled connection never returns to the pool.
 		cancel()
-		<-done
+		res := <-done
+		p.drainAndClose(res.resp)
 		return nil, nil, fmt.Errorf("per-try timeout: no response headers within %s", p.roundTripTimeout(remaining))
 	case <-r.Context().Done():
+		// Client gone: same reaping as the timeout path.
 		cancel()
-		<-done
+		res := <-done
+		p.drainAndClose(res.resp)
 		return nil, nil, r.Context().Err()
 	}
 }

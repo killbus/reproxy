@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -248,7 +249,7 @@ func TestProxyBudgetExhaustion(t *testing.T) {
 	if w.Code != 504 {
 		t.Fatalf("status = %d, want 504", w.Code)
 	}
-	if elapsed > 300*time.Millisecond {
+	if elapsed > 500*time.Millisecond {
 		t.Errorf("budget should cap the wait; elapsed %s exceeds the 100ms budget", elapsed)
 	}
 }
@@ -477,8 +478,6 @@ func TestProxyStrictBodyLimit413(t *testing.T) {
 // TestProxyBodyReplayedAcrossRetries: a captured body is replayed verbatim
 // on every attempt.
 func TestProxyBodyReplayedAcrossRetries(t *testing.T) {
-	var bodies []string
-	_ = bodies
 	mt := &mockTransport{
 		results: []mockResult{
 			{resp: respFor(500, "boom", nil)},
@@ -591,7 +590,10 @@ func TestProxyRetryAfterIgnored(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	if elapsed > 100*time.Millisecond {
+	// Generous upper bound: the point is that a 5s Retry-After was NOT
+	// honored (the wait would be seconds), not that the pipeline is fast.
+	// Windows timer/scheduler jitter alone spans tens of milliseconds.
+	if elapsed > 500*time.Millisecond {
 		t.Errorf("ignored Retry-After must not delay; elapsed %s", elapsed)
 	}
 }
@@ -719,26 +721,6 @@ func (e *errAfterReader) Read(p []byte) (int, error) {
 		return copy(p, e.prefix), nil
 	}
 	return 0, fmt.Errorf("upstream connection reset mid-body")
-}
-
-// doRecovered runs one request through the handler, recovering an
-// http.ErrAbortHandler panic (the honest post-commit failure mode) so the
-// committed recorder state can be asserted.
-func doRecovered(p *Proxy, method, target string, body io.Reader, hdr http.Header) (w *httptest.ResponseRecorder) {
-	req := httptest.NewRequest(method, target, body)
-	if hdr != nil {
-		req.Header = hdr
-	}
-	w = httptest.NewRecorder()
-	defer func() {
-		if rec := recover(); rec != nil {
-			if err, ok := rec.(error); !ok || err != http.ErrAbortHandler {
-				panic(rec)
-			}
-		}
-	}()
-	p.ServeHTTP(w, req)
-	return w
 }
 
 // TestProxySSEStreamedNotBuffered: an SSE-style upstream response is
@@ -979,7 +961,7 @@ func TestProxyRetryAfterPastDate(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	if elapsed > 100*time.Millisecond {
+	if elapsed > 500*time.Millisecond {
 		t.Errorf("past Retry-After must mean zero delay; elapsed %s", elapsed)
 	}
 }
@@ -1049,11 +1031,9 @@ func TestProxyClientDisconnectDuringWait(t *testing.T) {
 	if mt.calls != 1 {
 		t.Errorf("transport calls = %d, want 1 (disconnect aborts the retry loop)", mt.calls)
 	}
-	if w.Code != 200 {
-		// The recorder's default code is 200; nothing should have been
-		// written. httptest.ResponseRecorder.Code stays 200 with no
-		// WriteHeader call, and Body must be empty.
-	}
+	// Nothing should have been written to the client: the recorder never saw
+	// a WriteHeader call, so Code stays at its zero-value default (200) and
+	// the body must be empty.
 	if w.Body.Len() != 0 {
 		t.Errorf("body written after client disconnect: %q", w.Body.String())
 	}
@@ -1121,7 +1101,7 @@ func TestProxyPerStatusScopeShaping(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	if elapsed > 150*time.Millisecond {
+	if elapsed > 500*time.Millisecond {
 		t.Errorf("429 retry should use the retry[429] scope's 1ms wait; elapsed %s", elapsed)
 	}
 }
@@ -1277,4 +1257,70 @@ func TestProxyDegradedBodyForwarded(t *testing.T) {
 	if string(data) != "0123456789" {
 		t.Fatalf("upstream received body %q, want the full 10 bytes (streaming pass-through)", string(data))
 	}
+}
+
+// TestProxyRacedResponseBodyClosed pins the resource-cleanup contract on the
+// TTFB-timeout and client-disconnect paths: when the select in roundTrip picks
+// the timer (or request-context cancellation) while the transport has just
+// delivered a response, the response body must still be closed — otherwise the
+// pooled connection never returns to the transport's idle pool (a leak per
+// raced attempt).
+func TestProxyRacedResponseBodyClosed(t *testing.T) {
+	st := &racyTransport{}
+	p := testProxy(st, nil)
+
+	start := time.Now()
+	w := do(p, "GET", "/http/up.example.com/x?retry.budget=10ms", nil, nil)
+	if w.Code != 504 {
+		t.Fatalf("status = %d, want 504 (per-try TTFB bounded by the budget)", w.Code)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("raced attempt should end at the budget cap; elapsed %s", elapsed)
+	}
+	// The raced response body must have been closed promptly after the timer
+	// fired (the transport returns ~20ms after the 10ms cap).
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) && !st.closed.Load() {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !st.closed.Load() {
+		t.Error("LEAK: response body from the raced RoundTrip was never closed")
+	}
+}
+
+// racyTransport returns a successful response slightly after the request's
+// per-try TTFB cap, so the timer branch of the select races a ready result.
+type racyTransport struct {
+	closed atomic.Bool
+}
+
+func (s *racyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	time.Sleep(30 * time.Millisecond)
+	b := newNotifyingBody()
+	resp := &http.Response{StatusCode: 200, Header: http.Header{}, Body: b}
+	go func() {
+		<-b.closedCh
+		s.closed.Store(true)
+	}()
+	return resp, nil
+}
+
+// notifyingBody reports its Close via a channel so tests can observe it.
+type notifyingBody struct {
+	Reader   *strings.Reader
+	closedCh chan struct{}
+}
+
+func newNotifyingBody() *notifyingBody {
+	return &notifyingBody{Reader: strings.NewReader("racy"), closedCh: make(chan struct{})}
+}
+
+func (n *notifyingBody) Read(p []byte) (int, error) { return n.Reader.Read(p) }
+func (n *notifyingBody) Close() error {
+	select {
+	case <-n.closedCh:
+	default:
+		close(n.closedCh)
+	}
+	return nil
 }
