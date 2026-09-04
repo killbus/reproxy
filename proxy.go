@@ -283,6 +283,13 @@ func (p *Proxy) attemptLoop(
 		if r.Context().Err() != nil {
 			return
 		}
+		// Budget spent before the next attempt starts: stop the lifecycle
+		// here (audit item 4: the budget is a hard cap over all attempts and
+		// waits). The first attempt is exempt — a request always gets one
+		// try at the upstream.
+		if attemptNo > 1 && remaining() <= 0 {
+			break
+		}
 		attempts = attemptNo
 
 		resp, cancel, err := p.roundTrip(ctx, r, target, upstreamQuery, headers, captured, hadBody, attemptNo, remaining())
@@ -296,6 +303,12 @@ func (p *Proxy) attemptLoop(
 				break
 			}
 			wait := ComputeWait(policy.Default, attemptNo, "", remaining(), time.Now())
+			if remaining()-wait <= 0 {
+				// The budget cannot cover another wait+attempt cycle: the
+				// lifecycle ends here with a 504 (no response to deliver;
+				// lastErr already names the network failure).
+				break
+			}
 			if !p.sleepCtx(r.Context(), wait) {
 				return
 			}
@@ -311,10 +324,19 @@ func (p *Proxy) attemptLoop(
 			if sp.Attempts > limit {
 				limit = sp.Attempts
 			}
+			wait := ComputeWait(sp, attemptNo, retryAfter, remaining(), time.Now())
+			if remaining()-wait <= 0 {
+				// Budget out: the wait would consume the rest of the budget,
+				// leaving nothing for another attempt. Deliver the held
+				// response (the audit pins "budget exhausted -> return the
+				// last response"), flagged as exhausted.
+				p.commitResponse(w, r, resp, cancel, attempts, limit, degraded, true)
+				p.logRequest(r, target, resp.StatusCode, attempts, start)
+				return
+			}
 			p.drainAndClose(resp)
 			cancel()
 			p.logAttempt(target, attemptNo, resp.StatusCode, "retryable status", remaining(), attempts, limit)
-			wait := ComputeWait(sp, attemptNo, retryAfter, remaining(), time.Now())
 			if !p.sleepCtx(r.Context(), wait) {
 				return
 			}
