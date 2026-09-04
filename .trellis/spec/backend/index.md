@@ -15,11 +15,11 @@ This directory contains guidelines for backend development. Fill in each file wi
 | Guide | Description | Status |
 |-------|-------------|--------|
 | [Retry Proxy Contract](./retry-proxy-contract.md) | Query namespace, policy resolution, budget, response headers — executable protocol contract | Filled (09-04) |
-| [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | N/A (no DB) |
+| [Directory Structure](./directory-structure.md) | Flat single-package layout, one concern per file, stdlib-only rule | Filled (09-04) |
+| [Database Guidelines](./database-guidelines.md) | N/A — stateless proxy; reactivation rules for future persistence | Filled (N/A) |
 | [Error Handling](./error-handling.md) | Commit point, race cleanup, SSRF, streaming semantics | Filled (09-04) |
 | [Quality Guidelines](./quality-guidelines.md) | Test hardening, mutation scanning, forbidden patterns | Filled (09-04) |
-| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | See observability section in quality-guidelines.md |
+| [Logging Guidelines](./logging-guidelines.md) | event= key=value line format, event catalog, redaction rules | Filled (09-04) |
 
 ---
 
