@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 1
-- **Last Active**: 2026-09-03
+- **Total Sessions**: 2
+- **Last Active**: 2026-09-04
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~29 | Active |
+| `journal-1.md` | ~56 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 2 | 2026-09-04 | Implement reproxy MVP: check round, mutation scan, spec capture | `0a7b76a`, `425e9d6`, `be24540`, `00a57e5`, `4068f78`, `02f6ee1` | `main` |
 | 1 | 2026-09-03 | TEAM B audit: retry reverse proxy design & tech path | `f4f3775` | `main` |
 <!-- @@@/auto:session-history -->
 
