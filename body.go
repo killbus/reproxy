@@ -20,6 +20,11 @@ type CapturedBody struct {
 	// it is best-effort: the probe reads at most cap+1 bytes, so Len is the
 	// probe size, not the full body length.
 	Len int64
+	// Prefix holds the probe bytes (at most cap+1) when Oversized: the
+	// already-consumed head of the original stream. Degraded-mode
+	// pass-through splices it back in front of the unread request body so
+	// nothing is silently dropped.
+	Prefix []byte
 }
 
 // Capture reads at most cap+1 bytes from src (the Traefik-style probe
@@ -35,13 +40,14 @@ func Capture(src io.Reader, cap int64) (*CapturedBody, *RequestError) {
 	switch {
 	case err == nil:
 		// ReadFull filled cap+1 bytes: there is at least one byte over the
-		// cap. The body is oversized; do not keep the copy.
-		return &CapturedBody{Data: nil, Oversized: true, Len: int64(n)}, nil
+		// cap. The body is oversized; do not keep the copy, but keep the
+		// probe prefix so degraded pass-through can splice it back.
+		return &CapturedBody{Data: nil, Oversized: true, Len: int64(n), Prefix: buf[:n]}, nil
 	case err == io.EOF, err == io.ErrUnexpectedEOF:
 		// n bytes then end-of-stream: fits within the cap (n <= cap).
 		if cap == 0 && n > 0 {
 			// A zero cap cannot buffer anything; any body is oversized.
-			return &CapturedBody{Data: nil, Oversized: true, Len: int64(n)}, nil
+			return &CapturedBody{Data: nil, Oversized: true, Len: int64(n), Prefix: buf[:n]}, nil
 		}
 		return &CapturedBody{Data: buf[:n], Oversized: false, Len: int64(n)}, nil
 	default:
