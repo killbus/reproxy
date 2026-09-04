@@ -1,0 +1,2 @@
+{"file": ".trellis/tasks/archive/2026-09/09-03-audit-retry-proxy-design/research/audit-report.md", "reason": "Verify implementation against audit spec items 1-9 and MVP acceptance criteria"}
+{"file": "docs/adr/0001-choose-go-as-implementation-stack.md", "reason": "Check tech baseline conformance (stdlib-only, no framework)"}

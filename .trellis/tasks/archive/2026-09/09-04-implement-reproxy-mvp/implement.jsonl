@@ -1,0 +1,2 @@
+{"file": ".trellis/tasks/archive/2026-09/09-03-audit-retry-proxy-design/research/audit-report.md", "reason": "Protocol spec (Part 1 items 1-9) and MVP scope (Part 3) - the authoritative requirements source"}
+{"file": "docs/adr/0001-choose-go-as-implementation-stack.md", "reason": "Tech baseline: Go + stdlib, zero/one external deps, Traefik retry.go reference"}
