@@ -54,3 +54,28 @@ Implemented the full reproxy MVP in Go stdlib across 4 batches (target parsing, 
 ### Status
 
 [OK] **Completed**
+
+
+## Session 3: Project close-out: bootstrap spec completion, CI, v0.1.0, scaffold tracking
+<!-- trellis-session: v=2 fp=8a76cc243a08c84a -->
+
+**Date**: 2026-09-04
+**Task**: Project close-out: bootstrap spec completion, CI, v0.1.0, scaffold tracking
+**Branch**: `main`
+
+### Summary
+
+Closed out the reproxy project after MVP: deleted stray proxy_mod.html (F-7, user-approved); completed 00-bootstrap-guidelines (backend spec files filled from real code — directory structure, logging event catalog, database N/A; frontend marked N/A for the Go CLI project) and archived it; added GitHub Actions CI (build/vet/gofmt/test on Linux+Windows, race detector on Linux where the dev host cannot run it — no C compiler); tagged v0.1.0 at the CI commit; tracked all agent-platform scaffolding (.trellis/scripts, .claude, .codex, .cursor, .opencode, .agents — 202 files) with settings.local.json and runtime state excluded via root .gitignore. No git remote configured yet — CI stays dormant until the repo is pushed somewhere.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9b39e94` | chore(task): archive 00-bootstrap-guidelines |
+| `64d9839` | docs(spec): complete backend spec fill-in; frontend marked N/A (bootstrap task) |
+| `7a2132f` | ci: GitHub Actions — build, vet, gofmt, test on Linux+Windows, race on Linux |
+| `22531f9` | chore: track Trellis and agent-platform scaffolding |
+
+### Status
+
+[OK] **Completed**
