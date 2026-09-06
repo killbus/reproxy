@@ -79,3 +79,7 @@ Closed out the reproxy project after MVP: deleted stray proxy_mod.html (F-7, use
 ### Status
 
 [OK] **Completed**
+
+## 2026-09-06 — 09-04-query-ownership-modes done (v0.2.0)
+
+Query ownership landed: three-channel model (+pure/+retry scheme modes, X-Reproxy-Retry-Policy header, transitional plain→retry with deprecation gate). Design went through a 5-expert adversarial chatroom (3 rounds) before implementation; converged refinements D13–D15 folded into design.md (single-attempt literal, capture invariant, degenerate-header ladder, v0.3 flip criteria, README wording pins). 4 implement batches + full-scope check; mutation scan 29/29 killed after fixing F-1 (pure-mode framing lock — applied the m18 mutation for real to verify red, then restored). CI green on both OS + Linux race. Tagged v0.2.0. v0.3 flip (plain→pure + legacy env var) is a separate future task per design §7.
