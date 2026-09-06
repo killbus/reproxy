@@ -84,6 +84,17 @@ PROXY-TARGET   := "/" SCHEME-SEGMENT "/" AUTHORITY [ "/" RAW-PATH ]
   a usage hint naming all three accepted shapes. The mode suffix is matched
   against the original escaped bytes of the path: `%2B` is not `+`.
 
+The three channels are peers, each natural for a different author: the mode
+suffix declares who owns the query (a contract about the URL itself), the
+query channel carries policy that travels with the string, and the header
+channel carries policy set at the sending end. A third mode value, if one is
+ever added, would name a new ownership contract (e.g. reproxy claiming
+another query namespace) — it extends the two-value list by design decision,
+the same way retry and pure were added. Anything expressible as a retry
+field (how many attempts, which statuses) is policy, and lives in the query
+or header channel. The mode list is closed; there is no user-defined
+identifier slot.
+
 ### Pure mode semantics
 
 Pure mode is a pure reverse proxy:
