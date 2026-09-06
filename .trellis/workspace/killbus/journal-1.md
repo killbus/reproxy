@@ -83,3 +83,11 @@ Closed out the reproxy project after MVP: deleted stray proxy_mod.html (F-7, use
 ## 2026-09-06 — 09-04-query-ownership-modes done (v0.2.0)
 
 Query ownership landed: three-channel model (+pure/+retry scheme modes, X-Reproxy-Retry-Policy header, transitional plain→retry with deprecation gate). Design went through a 5-expert adversarial chatroom (3 rounds) before implementation; converged refinements D13–D15 folded into design.md (single-attempt literal, capture invariant, degenerate-header ladder, v0.3 flip criteria, README wording pins). 4 implement batches + full-scope check; mutation scan 29/29 killed after fixing F-1 (pure-mode framing lock — applied the m18 mutation for real to verify red, then restored). CI green on both OS + Linux race. Tagged v0.2.0. v0.3 flip (plain→pure + legacy env var) is a separate future task per design §7.
+
+## 2026-09-06 — 09-06-no-phantom-migration (v0.2.1)
+
+User challenge: "哪来现有用户，这是一个新项目，都没有 release，先入为主了？" — killed the v0.2→v0.3 transition machinery as a phantom-audience design. Plain scheme → pure terminal state; deprecation gate / hasRetryKeys / onNetworkRetry / ExplicitMode / event=deprecation / planned REPROXY_LEGACY_PLAIN_RETRY all deleted. Net −193 lines.
+
+Key decisions: (1) plain-row test policy — retry-semantics tests switched to +retry, plain-form tests flipped to pure expectations (both channels keep coverage); (2) tag v0.2.1 supersedes v0.2.0 rather than rewriting (tag messages describing dead semantics are superseded, never force-pushed); (3) check agent caught implement-report deviation-4 as a false claim (TestProxyRedirectNotFollowed not actually switched) — dispatching independent verification catches report drift.
+
+Mini mutation scan 3/3 killed (m1 plain→ModeRetry, m2 plain+header conflict restored, m3 SplitQuery-on-pure-path). Gates ×3 green; CI both OS + Linux race green (run 34038337558). Commit 3f73e30 + archive acf73a2.
