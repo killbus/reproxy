@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -89,13 +90,15 @@ func connectionTokens(values []string) map[string]bool {
 
 // buildOutboundHeaders assembles the upstream request headers from the
 // inbound request: all inbound headers minus hop-by-hop ones (plus those the
-// Connection header marks as hop-by-hop), with the forwarded-chain headers
-// appended (Via, X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host).
+// Connection header marks as hop-by-hop) and minus the reserved X-Reproxy-*
+// namespace (reproxy<->client protocol; the upstream never sees the proxy's
+// control plane), with the forwarded-chain headers appended (Via,
+// X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host).
 func buildOutboundHeaders(src http.Header, r *http.Request) http.Header {
 	tokens := connectionTokens(src.Values("Connection"))
 	out := http.Header{}
 	for name, vals := range src {
-		if isHopByHop(name, tokens) {
+		if isHopByHop(name, tokens) || isReproxyHeader(name) {
 			continue
 		}
 		for _, v := range vals {
@@ -141,11 +144,19 @@ func forwardedProto(r *http.Request) string {
 	return "http"
 }
 
-// ServeHTTP implements the request pipeline:
+// ServeHTTP implements the request pipeline (design §4):
 //
-//	parse target -> split query -> parse policy -> capture body ->
-//	SSRF gates (allowlist, resolve-then-pin) -> attempt loop ->
-//	COMMIT (headers written, body streamed) or exhaustion.
+//	parse target (mode included) -> resolve mode -> resolve channel
+//	(query split OR header policy, never both) -> body (capture only when
+//	a retry lifecycle exists) -> SSRF gates (allowlist, resolve-then-pin)
+//	-> attempt loop -> COMMIT (headers written, body streamed) or exhaustion.
+//
+// Mode resolution: a +pure scheme segment selects pure mode (the query
+// belongs to the target, byte-identical pass-through); +retry and —
+// transitionally, in v0.2 — the plain form select retry mode (v0.1.0
+// query-splitting semantics). Channel resolution: retry mode claims the
+// retry.* query keys; pure mode takes the policy from the
+// X-Reproxy-Retry-Policy header or runs as a literal single attempt.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// (1) Target from the path.
 	target, rerr := ParsePath(r.URL.EscapedPath())
@@ -157,51 +168,129 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		target = target.Normalize()
 	}
 
-	// (2) Split the query into passthrough + retry params.
-	upstreamQuery, retryParams, rerr := SplitQuery(r.URL.RawQuery)
-	if rerr != nil {
-		rerr.Write(w)
-		return
+	// (2)+(3) Mode and channel resolution. retryLifecycle reports whether a
+	// retry lifecycle exists at all: retry mode always; pure mode only when a
+	// header policy requested one. It gates body capture (D14) and the
+	// X-Retry-* observability headers.
+	var (
+		policy         Policy
+		upstreamQuery  string
+		retryLifecycle bool
+		onNetworkRetry func() // deprecation trigger, armed for plain-scheme requests only
+	)
+
+	switch target.Mode {
+	case ModePure:
+		// The query belongs to the target: no split, no claim, byte-identical
+		// pass-through (retry.* spellings are target data here). The policy
+		// may only arrive via the header channel; ParseRetryPolicyHeader
+		// also enforces the reserved X-Reproxy-* namespace (fail closed).
+		upstreamQuery = r.URL.RawQuery
+		params, rerr := ParseRetryPolicyHeader(r.Header)
+		if rerr != nil {
+			rerr.Write(w)
+			return
+		}
+		if params != nil {
+			policy, rerr = Parse(params, p.Config)
+			if rerr != nil {
+				rerr.Write(w)
+				return
+			}
+			retryLifecycle = true
+		} else {
+			// No header: the ONLY no-policy spelling. Pure proxy, single
+			// attempt — a literal (D13), never Parse(url.Values{}), which
+			// would return the v0.1.0 defaults (3 attempts, network=1) and
+			// smuggle a retry lifecycle into pure mode.
+			policy = SingleAttemptPolicy(p.Config)
+		}
+
+	default: // ModeRetry (the plain form resolves to it transitionally, R5)
+		// The reserved X-Reproxy-* namespace is enforced on this path too:
+		// the policy header is a conflict here, not a parse target, but
+		// unknown members must still 400 in every mode.
+		if rerr := validateReproxyNamespace(r.Header); rerr != nil {
+			rerr.Write(w)
+			return
+		}
+		// Mutual exclusion (design §3): query-splitting is active, so the
+		// header channel may not be used at the same time — fail closed.
+		if policyHeaderPresent(r.Header) {
+			(&RequestError{
+				Code:   400,
+				Reason: fmt.Sprintf("both retry channels are in use: the path selects retry mode (the query is reproxy's control plane) while the %s header carries a header-channel policy", RetryPolicyHeader),
+				Hint:   "the query channel and the header channel are mutually exclusive: remove the header, or use a +pure path (e.g. /https+pure/host) so the query stays target-owned; if you did not set this header, a middleware or gateway between you and reproxy may have added it",
+			}).Write(w)
+			return
+		}
+		// Plain form, v0.2 transitional default (R5): the request silently
+		// borrows the query for retry control. Arm the deprecation gate
+		// (design §5): fire once per request, on retry keys present at
+		// request time OR on a default network retry actually consumed.
+		if !target.ExplicitMode {
+			deprecate := newDeprecationLogger(p, target)
+			onNetworkRetry = func() { deprecate("network-retry") }
+			if hasRetryKeys(r.URL.RawQuery) {
+				deprecate("retry-keys")
+			}
+		}
+
+		var retryParams url.Values
+		upstreamQuery, retryParams, rerr = SplitQuery(r.URL.RawQuery)
+		if rerr != nil {
+			rerr.Write(w)
+			return
+		}
+		policy, rerr = Parse(retryParams, p.Config)
+		if rerr != nil {
+			rerr.Write(w)
+			return
+		}
+		retryLifecycle = true
 	}
 
-	// (3) Resolve the retry policy (server caps applied inside Parse).
-	policy, rerr := Parse(retryParams, p.Config)
-	if rerr != nil {
-		rerr.Write(w)
-		return
-	}
+	// (4) Body. Capture exists solely to replay across attempts (D14), so it
+	// runs only when a retry lifecycle exists: retry mode, or pure mode with
+	// a header policy. Pure mode without a header streams the body to the
+	// upstream as-is — no cap, no 413, no degraded mode, no X-Retry-Dropped.
+	var captured *CapturedBody
+	degraded := false
+	if retryLifecycle {
+		var rerr *RequestError
+		captured, rerr = Capture(r.Body, p.Config.MaxBody)
+		if rerr != nil {
+			rerr.Write(w)
+			return
+		}
+		// The request body is NOT closed here: the degraded pass-through path
+		// still streams from it (the capture probe consumed only the head).
 
-	// (4) Capture the request body for replay.
-	captured, rerr := Capture(r.Body, p.Config.MaxBody)
-	if rerr != nil {
-		rerr.Write(w)
-		return
-	}
-	// The request body is NOT closed here: the degraded pass-through path
-	// still streams from it (the capture probe consumed only the head).
-
-	degraded := captured.Oversized
-	if degraded && p.Config.StrictBodyLimit {
-		_ = r.Body.Close()
-		(&RequestError{
-			Code:   413,
-			Reason: fmt.Sprintf("request body exceeds the capture cap of %d bytes, so it cannot be retried", p.Config.MaxBody),
-			Hint:   "send a smaller body, or raise --max-body; retries need a buffered copy of the request",
-		}).Write(w)
-		return
-	}
-	// Degraded (non-strict) mode: one pass-through attempt, no retry logic.
-	// The audit pins streaming pass-through with X-Retry-Dropped and a warn
-	// log — the body is never silently dropped.
-	if degraded {
-		p.logLine("warn", fmt.Sprintf("request body exceeds the %d-byte capture cap: degrading to a single pass-through attempt (no retry)", p.Config.MaxBody))
+		degraded = captured.Oversized
+		if degraded && p.Config.StrictBodyLimit {
+			_ = r.Body.Close()
+			(&RequestError{
+				Code:   413,
+				Reason: fmt.Sprintf("request body exceeds the capture cap of %d bytes, so it cannot be retried", p.Config.MaxBody),
+				Hint:   "send a smaller body, or raise --max-body; retries need a buffered copy of the request",
+			}).Write(w)
+			return
+		}
+		// Degraded (non-strict) mode: one pass-through attempt, no retry
+		// logic. The audit pins streaming pass-through with X-Retry-Dropped
+		// and a warn log — the body is never silently dropped.
+		if degraded {
+			p.logLine("warn", fmt.Sprintf("request body exceeds the %d-byte capture cap: degrading to a single pass-through attempt (no retry)", p.Config.MaxBody))
+		}
 	}
 	attemptsLimit := policy.Default.Attempts
 	if degraded {
 		attemptsLimit = 1
 	}
 
-	// (5) SSRF L2: allowlist gate BEFORE any DNS work.
+	// (5) SSRF L2: allowlist gate BEFORE any DNS work. Identical in every
+	// mode: the destination is the same attack surface whether or not
+	// retries happen.
 	if !p.Config.Allows(target.Host) {
 		(&RequestError{
 			Code:   403,
@@ -221,13 +310,51 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := WithPinnedIPs(r.Context(), pinned)
 
 	// (6) The attempt loop.
-	p.attemptLoop(w, r, target, upstreamQuery, captured, degraded, attemptsLimit, policy, ctx)
+	p.attemptLoop(w, r, target, upstreamQuery, captured, degraded, attemptsLimit, policy, ctx, retryLifecycle, onNetworkRetry)
+}
+
+// policyHeaderPresent reports whether an X-Reproxy-Retry-Policy header is
+// present under any spelling (the wire gives canonical keys; hand-built maps
+// may not). Cheap presence check for the channel-conflict gate — the parse
+// itself happens only when the header channel wins.
+func policyHeaderPresent(h http.Header) bool {
+	for name, vals := range h {
+		if http.CanonicalHeaderKey(name) == RetryPolicyHeader && len(vals) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// newDeprecationLogger builds the per-request event=deprecation emitter for
+// plain-scheme requests (design §5): it fires at most once per request even
+// if both triggers hit (retry keys present and a default network retry
+// consumed). No cross-request state is kept — dedup is per request only.
+func newDeprecationLogger(p *Proxy, target PathTarget) func(string) {
+	var fired bool
+	return func(trigger string) {
+		if fired {
+			return
+		}
+		fired = true
+		p.logLine("deprecation", fmt.Sprintf(
+			"target=%s trigger=%s note=%q",
+			target.HostPort(), trigger,
+			"the plain scheme segment selects retry mode only transitionally (v0.2); migrate to /SCHEME+retry/, /SCHEME+pure/, or the X-Reproxy-Retry-Policy header before v0.3",
+		))
+	}
 }
 
 // attemptLoop drives the retry lifecycle. It is the only writer to the
 // ResponseWriter; the commit point is writing the response headers. After
 // the commit this function never returns an error to the caller by retrying
 // — mid-body failures after commit panic with http.ErrAbortHandler.
+//
+// retryLifecycle gates the X-Retry-* observability headers: retry mode
+// always has a lifecycle to report; headerless pure mode does not (single
+// attempt, no gates — nothing to observe). onNetworkRetry, when non-nil, is
+// invoked once a network retry is actually consumed (the deprecation gate's
+// implicit trigger for plain-scheme requests).
 func (p *Proxy) attemptLoop(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -238,6 +365,8 @@ func (p *Proxy) attemptLoop(
 	attemptsLimit int,
 	policy Policy,
 	ctx context.Context,
+	retryLifecycle bool,
+	onNetworkRetry func(),
 ) {
 	start := time.Now()
 
@@ -252,16 +381,22 @@ func (p *Proxy) attemptLoop(
 	}
 
 	headers := buildOutboundHeaders(r.Header, r)
-	// Replay uses the buffered copy. Degraded pass-through streams the
-	// original body: the probe's already-read prefix spliced in front of the
-	// unread remainder (the capture must not silently eat bytes).
-	hadBody := len(captured.Data) > 0 && !captured.Oversized
-	degradedBody := degraded && r.Body != nil
-	if degradedBody {
-		r.Body = struct {
-			io.Reader
-			io.Closer
-		}{io.MultiReader(bytes.NewReader(captured.Prefix), r.Body), r.Body}
+	// Replay uses the buffered copy (nil captured = pure-mode streaming:
+	// the body was never captured, so it is forwarded as the request's own
+	// stream, single-shot). Degraded pass-through also streams the original
+	// body: the probe's already-read prefix spliced in front of the unread
+	// remainder (the capture must not silently eat bytes).
+	var hadBody bool
+	var degradedBody bool
+	if captured != nil {
+		hadBody = len(captured.Data) > 0 && !captured.Oversized
+		degradedBody = degraded && r.Body != nil
+		if degradedBody {
+			r.Body = struct {
+				io.Reader
+				io.Closer
+			}{io.MultiReader(bytes.NewReader(captured.Prefix), r.Body), r.Body}
+		}
 	}
 
 	var (
@@ -302,6 +437,13 @@ func (p *Proxy) attemptLoop(
 			if !policy.NetworkGate || attemptNo == limit {
 				break
 			}
+			// A network retry is actually consumed: fire the deprecation
+			// gate's implicit trigger (plain-scheme request relying on the
+			// default retry.network=1 — its v0.3 behavior changes silently
+			// otherwise; design §5).
+			if onNetworkRetry != nil {
+				onNetworkRetry()
+			}
 			wait := ComputeWait(policy.Default, attemptNo, "", remaining(), time.Now())
 			if remaining()-wait <= 0 {
 				// The budget cannot cover another wait+attempt cycle: the
@@ -331,7 +473,7 @@ func (p *Proxy) attemptLoop(
 				// leaving nothing for another attempt. Deliver the held
 				// response (the audit pins "budget exhausted -> return the
 				// last response"), flagged as exhausted.
-				p.commitResponse(w, r, resp, cancel, attempts, limit, degraded, true)
+				p.commitResponse(w, r, resp, cancel, attempts, limit, degraded, true, retryLifecycle)
 				p.logRequest(r, target, resp.StatusCode, attempts, start)
 				return
 			}
@@ -350,13 +492,13 @@ func (p *Proxy) attemptLoop(
 		// A retryable status delivered here means attempts ran out: the
 		// client still gets the real upstream verdict, flagged as exhausted.
 		exhausted := policy.RetryableStatus(resp.StatusCode) && !degraded
-		p.commitResponse(w, r, resp, cancel, attempts, limit, degraded, exhausted)
+		p.commitResponse(w, r, resp, cancel, attempts, limit, degraded, exhausted, retryLifecycle)
 		p.logRequest(r, target, resp.StatusCode, attempts, start)
 		return
 	}
 
 	// Exhaustion: the loop ran out of attempts (or the budget/gate closed).
-	p.exhausted(w, r, target, lastErr, attempts, limit, degraded, start)
+	p.exhausted(w, r, target, lastErr, attempts, limit, degraded, retryLifecycle, start)
 }
 
 // roundTripTimeout caps one attempt's time-to-first-byte: how long the
@@ -416,9 +558,17 @@ func (p *Proxy) roundTrip(
 	req.Host = target.HostPort()
 	req.Header = headers
 
-	// Body replay: fresh reader each attempt. Degraded mode streams the
-	// original body instead (prefix + unread remainder), single-shot.
-	if captured.Oversized && r.Body != nil {
+	// Body replay: fresh reader each attempt. Degraded mode and pure mode
+	// stream the original body instead (prefix + unread remainder for
+	// degraded; the untouched stream for pure), single-shot.
+	if captured == nil && r.Body != nil {
+		// Pure-mode streaming: no capture (no retry lifecycle, or none
+		// needed) — the request's own body stream is forwarded once, with
+		// the inbound framing preserved (Content-Length stays Content-Length;
+		// chunked stays chunked; NoBody stays zero-length).
+		req.Body = r.Body
+		req.ContentLength = r.ContentLength
+	} else if captured != nil && captured.Oversized && r.Body != nil {
 		req.Body = r.Body
 		req.ContentLength = -1 // chunked: the total size was never read
 	} else if hadBody && captured.Reader() != nil {
@@ -472,11 +622,12 @@ func (p *Proxy) roundTrip(
 
 // commitResponse is the COMMIT point (audit item 8): response headers are
 // copied to the client (minus hop-by-hop), X-Retry-* observability headers
-// are attached, WriteHeader is called, and the body is streamed with
-// per-write flushing (SSE-friendly). After WriteHeader, retry is impossible
-// by construction; mid-body errors abort the client connection via
-// panic(http.ErrAbortHandler), mirroring httputil.ReverseProxy.
-func (p *Proxy) commitResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, cancel context.CancelFunc, attempts, limit int, degraded, exhausted bool) {
+// are attached when a retry lifecycle exists, WriteHeader is called, and the
+// body is streamed with per-write flushing (SSE-friendly). After
+// WriteHeader, retry is impossible by construction; mid-body errors abort
+// the client connection via panic(http.ErrAbortHandler), mirroring
+// httputil.ReverseProxy.
+func (p *Proxy) commitResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, cancel context.CancelFunc, attempts, limit int, degraded, exhausted, retryLifecycle bool) {
 	defer p.drainAndClose(resp)
 	defer cancel()
 
@@ -489,13 +640,18 @@ func (p *Proxy) commitResponse(w http.ResponseWriter, r *http.Request, resp *htt
 			w.Header().Add(name, v)
 		}
 	}
-	w.Header().Set("X-Retry-Count", strconv.Itoa(attempts))
-	w.Header().Set("X-Retry-Limit", strconv.Itoa(limit))
-	if degraded {
-		w.Header().Set("X-Retry-Dropped", "body-too-large")
-	}
-	if exhausted {
-		w.Header().Set("X-Retry-Exhausted", "1")
+	// Observability headers only when there is a retry lifecycle to report:
+	// retry mode, or pure mode with a header policy. Headerless pure mode
+	// emits none (single attempt, no gates, no cap machinery).
+	if retryLifecycle {
+		w.Header().Set("X-Retry-Count", strconv.Itoa(attempts))
+		w.Header().Set("X-Retry-Limit", strconv.Itoa(limit))
+		if degraded {
+			w.Header().Set("X-Retry-Dropped", "body-too-large")
+		}
+		if exhausted {
+			w.Header().Set("X-Retry-Exhausted", "1")
+		}
 	}
 
 	w.WriteHeader(resp.StatusCode)
@@ -518,21 +674,25 @@ func (p *Proxy) commitResponse(w http.ResponseWriter, r *http.Request, resp *htt
 // Retryable-status exhaustion is handled in the commit path (the last
 // upstream response is delivered with X-Retry-Exhausted). Budget exhaustion
 // lands here too (waits are budget-capped, so the loop simply runs out of
-// time and attempts).
+// time and attempts). The X-Retry-* headers appear only when a retry
+// lifecycle exists — headerless pure mode fails its single attempt here
+// without them (single attempt, no gates: nothing to observe).
 func (p *Proxy) exhausted(
 	w http.ResponseWriter,
 	r *http.Request,
 	target PathTarget,
 	lastErr error,
 	attempts, limit int,
-	degraded bool,
+	degraded, retryLifecycle bool,
 	start time.Time,
 ) {
-	w.Header().Set("X-Retry-Count", strconv.Itoa(attempts))
-	w.Header().Set("X-Retry-Limit", strconv.Itoa(limit))
-	w.Header().Set("X-Retry-Exhausted", "1")
-	if degraded {
-		w.Header().Set("X-Retry-Dropped", "body-too-large")
+	if retryLifecycle {
+		w.Header().Set("X-Retry-Count", strconv.Itoa(attempts))
+		w.Header().Set("X-Retry-Limit", strconv.Itoa(limit))
+		w.Header().Set("X-Retry-Exhausted", "1")
+		if degraded {
+			w.Header().Set("X-Retry-Dropped", "body-too-large")
+		}
 	}
 	reason := "all retry attempts failed with network errors"
 	if lastErr != nil {
@@ -606,11 +766,13 @@ func (p *Proxy) logAttempt(target PathTarget, attemptNo, status int, reason stri
 			target.HostPort(), attemptNo, status, reason, remainingBudget.Round(time.Millisecond), attempts, limit))
 }
 
-// logRequest emits the per-request summary line.
+// logRequest emits the per-request summary line. mode reports the
+// query-ownership mode the request ran under (retry | pure) so operators can
+// measure their channel mix ahead of the v0.3 plain-form flip (R3/R6).
 func (p *Proxy) logRequest(r *http.Request, target PathTarget, status int, attempts int, start time.Time) {
 	p.logLine("request",
-		fmt.Sprintf("method=%s target=%s status=%d attempts=%d duration=%s",
-			r.Method, target.HostPort(), status, attempts, time.Since(start).Round(time.Millisecond)))
+		fmt.Sprintf("method=%s target=%s mode=%s status=%d attempts=%d duration=%s",
+			r.Method, target.HostPort(), target.Mode, status, attempts, time.Since(start).Round(time.Millisecond)))
 }
 
 // logLine emits one structured-ish log line via the injectable logger.

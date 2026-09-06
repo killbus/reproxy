@@ -220,6 +220,38 @@ func Parse(params url.Values, cfg *ServerConfig) (Policy, *RequestError) {
 	return policy, nil
 }
 
+// SingleAttemptPolicy returns the pure-mode, headerless policy: exactly one
+// attempt, every retry gate off (design D13). It is a LITERAL — never
+// Parse(url.Values{}), which returns the v0.1.0 defaults (3 attempts,
+// network=1, 30s budget) and would smuggle a retry lifecycle into pure mode.
+// The shape fields carry inert defaults: with one attempt no wait is ever
+// computed, so they never influence behavior.
+//
+// Budget is the one field that stays live: it is not a retry-lifecycle cap
+// here but the bound feeding the per-try TTFB timeout (which still applies in
+// pure mode — it bounds a hang, not a retry). It defaults to DefaultBudget
+// and is narrowed by the server's MaxBudget clamp, mirroring Parse.
+func SingleAttemptPolicy(cfg *ServerConfig) Policy {
+	budget := DefaultBudget
+	if cfg != nil && cfg.MaxBudget > 0 && budget > cfg.MaxBudget {
+		budget = cfg.MaxBudget
+	}
+	return Policy{
+		Default: ScopePolicy{
+			Attempts:   1,
+			Backoff:    DefaultBackoff,
+			Initial:    DefaultInitial,
+			Max:        DefaultMaxWait,
+			Jitter:     DefaultJitter,
+			RetryAfter: DefaultRetryAfter,
+		},
+		ByStatus:    map[int]ScopePolicy{},
+		StatusGate:  nil,
+		NetworkGate: false,
+		Budget:      budget,
+	}
+}
+
 // applyScopeField parses one FIELD=value and records it on sp. The key is
 // carried through to error messages so the client sees which key failed.
 // Unknown fields (including gate names like status/network/budget, which are

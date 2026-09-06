@@ -1,0 +1,3 @@
+{"file": ".trellis/tasks/archive/2026-09/09-03-audit-retry-proxy-design/research/audit-report.md", "reason": "Pinned semantics baseline (query namespace, fail-closed validation, byte preservation) that retry mode must preserve exactly"}
+{"file": ".trellis/spec/backend/retry-proxy-contract.md", "reason": "Executable contract being extended: query namespace, three-tier resolution, validation matrix - new modes must not weaken it"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Streaming and commit-point invariants - pure mode body streaming must respect them"}

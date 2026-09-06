@@ -9,7 +9,8 @@ import (
 
 // PathTarget is an upstream destination extracted from the proxy path.
 type PathTarget struct {
-	// Scheme is the upstream scheme, "http" or "https".
+	// Scheme is the upstream scheme, "http" or "https" (a mode suffix on the
+	// scheme segment is stripped; see Mode).
 	Scheme string
 	// Host is the upstream host: a DNS name, an IPv4 literal, or an IPv6
 	// literal without brackets (brackets are stripped during parsing).
@@ -19,6 +20,15 @@ type PathTarget struct {
 	// RawPath is the upstream path passed through as raw bytes (leading "/"
 	// included). It is never decoded or re-encoded. Empty targets normalize to "/".
 	RawPath string
+	// Mode is the query-ownership mode selected by the scheme segment:
+	// "retry" (reproxy may claim retry.* query keys) or "pure" (the query
+	// belongs to the target and passes through byte-identical).
+	Mode string
+	// ExplicitMode reports whether the scheme segment carried an explicit
+	// "+MODE" suffix, as opposed to the plain form. The plain form resolves
+	// to "retry" only transitionally (R5); the deprecation gate and the v0.3
+	// plain-form flip key off this distinction.
+	ExplicitMode bool
 }
 
 // HostPort returns the "host:port" authority form, bracketing IPv6 literals.
@@ -35,18 +45,38 @@ func (t PathTarget) URL() string {
 	return t.Scheme + "://" + t.HostPort() + t.RawPath
 }
 
+// Query-ownership modes selected by the scheme-segment mode suffix
+// (design §1): they decide who owns the request query.
+const (
+	// ModeRetry: reproxy may claim retry.* / retry[ keys in the query (the
+	// v0.1.0 URL channel).
+	ModeRetry = "retry"
+	// ModePure: the query belongs to the target and passes through verbatim;
+	// the policy can only arrive via the header channel.
+	ModePure = "pure"
+)
+
 // usageHint is attached to errors caused by malformed or missing targets so
-// clients get the expected path shape in the error body.
-const usageHint = `expected path "/SCHEME/AUTHORITY[/PATH]" with SCHEME http or https, e.g. "/https/api.example.com/v1/chat"`
+// clients get the expected path shape in the error body. It names all three
+// accepted scheme-segment shapes (plain, +retry, +pure).
+const usageHint = `expected path "/SCHEME[+MODE]/AUTHORITY[/PATH]" with SCHEME http or https and optional MODE retry or pure, e.g. "/https/api.example.com/v1/chat", "/https+retry/api.example.com/v1/chat", or "/https+pure/api.example.com/v1/chat"`
 
 // ParsePath parses a proxy target from the escaped request path (use
 // r.URL.EscapedPath() so RAW-PATH bytes are preserved verbatim).
 //
-// Grammar: PROXY-TARGET := "/" SCHEME "/" AUTHORITY [ "/" RAW-PATH ]
+// Grammar: PROXY-TARGET := "/" SCHEME-SEGMENT "/" AUTHORITY [ "/" RAW-PATH ]
 //
-// Parsing is strict by design (SSRF layer L1): unknown schemes, userinfo,
-// bracket-less IPv6, out-of-range or leading-zero ports, and malformed hosts
-// are all rejected with a 400 RequestError naming the cause.
+//	SCHEME-SEGMENT := SCHEME [ "+" MODE ]    (MODE: retry | pure)
+//
+// The scheme segment is matched against the original escaped bytes: "%2B" is
+// not "+" (no normalization re-interprets encoded characters as syntax), so
+// "/https%2Bpure/host" fails scheme validation as the literal segment
+// "https%2Bpure".
+//
+// Parsing is strict by design (SSRF layer L1): unknown schemes, malformed
+// mode suffixes, userinfo, bracket-less IPv6, out-of-range or leading-zero
+// ports, and malformed hosts are all rejected with a 400 RequestError naming
+// the cause (and the raw segment, so typos are diagnosable).
 func ParsePath(escapedPath string) (PathTarget, *RequestError) {
 	if escapedPath == "" || escapedPath == "/" {
 		return PathTarget{}, &RequestError{
@@ -57,27 +87,16 @@ func ParsePath(escapedPath string) (PathTarget, *RequestError) {
 	}
 	rest := strings.TrimPrefix(escapedPath, "/")
 
-	// Split off the scheme (first path segment before the next "/").
+	// Split off the scheme segment (first path segment before the next "/").
 	var schemeSeg, remainder string
 	if i := strings.Index(rest, "/"); i >= 0 {
 		schemeSeg, remainder = rest[:i], rest[i+1:]
 	} else {
 		schemeSeg, remainder = rest, ""
 	}
-	scheme := strings.ToLower(schemeSeg)
-	if scheme != "http" && scheme != "https" {
-		if schemeSeg == "" {
-			return PathTarget{}, &RequestError{
-				Code:   400,
-				Reason: "missing upstream target in path",
-				Hint:   usageHint,
-			}
-		}
-		return PathTarget{}, &RequestError{
-			Code:   400,
-			Reason: fmt.Sprintf("unsupported scheme %q: only http and https are supported", schemeSeg),
-			Hint:   usageHint,
-		}
+	scheme, mode, explicitMode, rerr := parseSchemeSegment(schemeSeg)
+	if rerr != nil {
+		return PathTarget{}, rerr
 	}
 
 	// Split off the authority (segment between scheme and raw path).
@@ -103,7 +122,53 @@ func ParsePath(escapedPath string) (PathTarget, *RequestError) {
 	if rawPath == "" {
 		rawPath = "/"
 	}
-	return PathTarget{Scheme: scheme, Host: host, Port: port, RawPath: rawPath}, nil
+	return PathTarget{Scheme: scheme, Host: host, Port: port, RawPath: rawPath, Mode: mode, ExplicitMode: explicitMode}, nil
+}
+
+// parseSchemeSegment validates the first path segment against the strict
+// table {plain, +retry, +pure} × {http, https}, case-insensitive (the whole
+// segment is lowercased before the split, so SCHEME and MODE normalize
+// together: "HTTPS+PURE" == "https+pure"). Returns the mode-stripped scheme,
+// the resolved query-ownership mode, and whether an explicit "+MODE" suffix
+// was present (the plain form resolves to retry mode only transitionally —
+// see the TODO below).
+//
+// Anything else — an unknown scheme, a typo'd mode ("https+retrt"), a bare
+// "+" or "+retry" with no scheme — is a 400 whose reason names the actual
+// malformed segment (design §1: the first segment stays "speaking scheme",
+// so a typo reads as an unsupported scheme naming the input) and whose hint
+// carries the usage hint with all three accepted shapes.
+func parseSchemeSegment(segment string) (scheme, mode string, explicitMode bool, rerr *RequestError) {
+	lower := strings.ToLower(segment)
+	scheme, modePart, hasSuffix := strings.Cut(lower, "+")
+
+	switch {
+	case !hasSuffix && (scheme == "http" || scheme == "https"):
+		// Plain form: the query channel keeps v0.1.0 semantics transitionally.
+		// TODO(v0.3): flip the plain form to ModePure per the R5 migration
+		// (version bump + time window, per design D15). Until then plain
+		// resolves to retry mode and ServeHTTP emits the deprecation log
+		// when retry keys are present or a default network retry is consumed.
+		return scheme, ModeRetry, false, nil
+	case hasSuffix && (scheme == "http" || scheme == "https") && modePart == ModeRetry:
+		return scheme, ModeRetry, true, nil
+	case hasSuffix && (scheme == "http" || scheme == "https") && modePart == ModePure:
+		return scheme, ModePure, true, nil
+	case segment == "":
+		// "//host/..." — the path's first segment is empty, which the caller
+		// reports as a missing target.
+		return "", "", false, &RequestError{
+			Code:   400,
+			Reason: "missing upstream target in path",
+			Hint:   usageHint,
+		}
+	default:
+		return "", "", false, &RequestError{
+			Code:   400,
+			Reason: fmt.Sprintf("unsupported scheme %q: only http and https are supported, optionally with a +retry or +pure mode suffix", segment),
+			Hint:   usageHint,
+		}
+	}
 }
 
 // parseAuthority splits and validates the authority: host plus optional port.
