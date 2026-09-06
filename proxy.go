@@ -151,9 +151,9 @@ func forwardedProto(r *http.Request) string {
 //	a retry lifecycle exists) -> SSRF gates (allowlist, resolve-then-pin)
 //	-> attempt loop -> COMMIT (headers written, body streamed) or exhaustion.
 //
-// Mode resolution: a +pure scheme segment selects pure mode (the query
-// belongs to the target, byte-identical pass-through); +retry and —
-// transitionally, in v0.2 — the plain form select retry mode (v0.1.0
+// Mode resolution: a +pure scheme segment (or the plain form, which is
+// equivalent to it) selects pure mode — the query belongs to the target,
+// byte-identical pass-through. +retry selects retry mode (v0.1.0
 // query-splitting semantics). Channel resolution: retry mode claims the
 // retry.* query keys; pure mode takes the policy from the
 // X-Reproxy-Retry-Policy header or runs as a literal single attempt.
@@ -176,7 +176,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		policy         Policy
 		upstreamQuery  string
 		retryLifecycle bool
-		onNetworkRetry func() // deprecation trigger, armed for plain-scheme requests only
 	)
 
 	switch target.Mode {
@@ -206,7 +205,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			policy = SingleAttemptPolicy(p.Config)
 		}
 
-	default: // ModeRetry (the plain form resolves to it transitionally, R5)
+	default: // ModeRetry (the "+retry" scheme segment)
 		// The reserved X-Reproxy-* namespace is enforced on this path too:
 		// the policy header is a conflict here, not a parse target, but
 		// unknown members must still 400 in every mode.
@@ -223,17 +222,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Hint:   "the query channel and the header channel are mutually exclusive: remove the header, or use a +pure path (e.g. /https+pure/host) so the query stays target-owned; if you did not set this header, a middleware or gateway between you and reproxy may have added it",
 			}).Write(w)
 			return
-		}
-		// Plain form, v0.2 transitional default (R5): the request silently
-		// borrows the query for retry control. Arm the deprecation gate
-		// (design §5): fire once per request, on retry keys present at
-		// request time OR on a default network retry actually consumed.
-		if !target.ExplicitMode {
-			deprecate := newDeprecationLogger(p, target)
-			onNetworkRetry = func() { deprecate("network-retry") }
-			if hasRetryKeys(r.URL.RawQuery) {
-				deprecate("retry-keys")
-			}
 		}
 
 		var retryParams url.Values
@@ -310,7 +298,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := WithPinnedIPs(r.Context(), pinned)
 
 	// (6) The attempt loop.
-	p.attemptLoop(w, r, target, upstreamQuery, captured, degraded, attemptsLimit, policy, ctx, retryLifecycle, onNetworkRetry)
+	p.attemptLoop(w, r, target, upstreamQuery, captured, degraded, attemptsLimit, policy, ctx, retryLifecycle)
 }
 
 // policyHeaderPresent reports whether an X-Reproxy-Retry-Policy header is
@@ -326,25 +314,6 @@ func policyHeaderPresent(h http.Header) bool {
 	return false
 }
 
-// newDeprecationLogger builds the per-request event=deprecation emitter for
-// plain-scheme requests (design §5): it fires at most once per request even
-// if both triggers hit (retry keys present and a default network retry
-// consumed). No cross-request state is kept — dedup is per request only.
-func newDeprecationLogger(p *Proxy, target PathTarget) func(string) {
-	var fired bool
-	return func(trigger string) {
-		if fired {
-			return
-		}
-		fired = true
-		p.logLine("deprecation", fmt.Sprintf(
-			"target=%s trigger=%s note=%q",
-			target.HostPort(), trigger,
-			"the plain scheme segment selects retry mode only transitionally (v0.2); migrate to /SCHEME+retry/, /SCHEME+pure/, or the X-Reproxy-Retry-Policy header before v0.3",
-		))
-	}
-}
-
 // attemptLoop drives the retry lifecycle. It is the only writer to the
 // ResponseWriter; the commit point is writing the response headers. After
 // the commit this function never returns an error to the caller by retrying
@@ -352,9 +321,7 @@ func newDeprecationLogger(p *Proxy, target PathTarget) func(string) {
 //
 // retryLifecycle gates the X-Retry-* observability headers: retry mode
 // always has a lifecycle to report; headerless pure mode does not (single
-// attempt, no gates — nothing to observe). onNetworkRetry, when non-nil, is
-// invoked once a network retry is actually consumed (the deprecation gate's
-// implicit trigger for plain-scheme requests).
+// attempt, no gates — nothing to observe).
 func (p *Proxy) attemptLoop(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -366,7 +333,6 @@ func (p *Proxy) attemptLoop(
 	policy Policy,
 	ctx context.Context,
 	retryLifecycle bool,
-	onNetworkRetry func(),
 ) {
 	start := time.Now()
 
@@ -436,13 +402,6 @@ func (p *Proxy) attemptLoop(
 			p.logAttempt(target, attemptNo, 0, err.Error(), remaining(), attempts, limit)
 			if !policy.NetworkGate || attemptNo == limit {
 				break
-			}
-			// A network retry is actually consumed: fire the deprecation
-			// gate's implicit trigger (plain-scheme request relying on the
-			// default retry.network=1 — its v0.3 behavior changes silently
-			// otherwise; design §5).
-			if onNetworkRetry != nil {
-				onNetworkRetry()
 			}
 			wait := ComputeWait(policy.Default, attemptNo, "", remaining(), time.Now())
 			if remaining()-wait <= 0 {
@@ -768,7 +727,7 @@ func (p *Proxy) logAttempt(target PathTarget, attemptNo, status int, reason stri
 
 // logRequest emits the per-request summary line. mode reports the
 // query-ownership mode the request ran under (retry | pure) so operators can
-// measure their channel mix ahead of the v0.3 plain-form flip (R3/R6).
+// measure their channel mix (R3/R6).
 func (p *Proxy) logRequest(r *http.Request, target PathTarget, status int, attempts int, start time.Time) {
 	p.logLine("request",
 		fmt.Sprintf("method=%s target=%s mode=%s status=%d attempts=%d duration=%s",

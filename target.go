@@ -22,13 +22,9 @@ type PathTarget struct {
 	RawPath string
 	// Mode is the query-ownership mode selected by the scheme segment:
 	// "retry" (reproxy may claim retry.* query keys) or "pure" (the query
-	// belongs to the target and passes through byte-identical).
+	// belongs to the target and passes through byte-identical). The plain
+	// form (no "+MODE" suffix) resolves to "pure".
 	Mode string
-	// ExplicitMode reports whether the scheme segment carried an explicit
-	// "+MODE" suffix, as opposed to the plain form. The plain form resolves
-	// to "retry" only transitionally (R5); the deprecation gate and the v0.3
-	// plain-form flip key off this distinction.
-	ExplicitMode bool
 }
 
 // HostPort returns the "host:port" authority form, bracketing IPv6 literals.
@@ -94,7 +90,7 @@ func ParsePath(escapedPath string) (PathTarget, *RequestError) {
 	} else {
 		schemeSeg, remainder = rest, ""
 	}
-	scheme, mode, explicitMode, rerr := parseSchemeSegment(schemeSeg)
+	scheme, mode, rerr := parseSchemeSegment(schemeSeg)
 	if rerr != nil {
 		return PathTarget{}, rerr
 	}
@@ -122,48 +118,43 @@ func ParsePath(escapedPath string) (PathTarget, *RequestError) {
 	if rawPath == "" {
 		rawPath = "/"
 	}
-	return PathTarget{Scheme: scheme, Host: host, Port: port, RawPath: rawPath, Mode: mode, ExplicitMode: explicitMode}, nil
+	return PathTarget{Scheme: scheme, Host: host, Port: port, RawPath: rawPath, Mode: mode}, nil
 }
 
 // parseSchemeSegment validates the first path segment against the strict
 // table {plain, +retry, +pure} × {http, https}, case-insensitive (the whole
 // segment is lowercased before the split, so SCHEME and MODE normalize
-// together: "HTTPS+PURE" == "https+pure"). Returns the mode-stripped scheme,
-// the resolved query-ownership mode, and whether an explicit "+MODE" suffix
-// was present (the plain form resolves to retry mode only transitionally —
-// see the TODO below).
+// together: "HTTPS+PURE" == "https+pure"). Returns the mode-stripped scheme
+// and the resolved query-ownership mode. The plain form is equivalent to
+// "+pure": the query belongs to the target.
 //
 // Anything else — an unknown scheme, a typo'd mode ("https+retrt"), a bare
 // "+" or "+retry" with no scheme — is a 400 whose reason names the actual
 // malformed segment (design §1: the first segment stays "speaking scheme",
 // so a typo reads as an unsupported scheme naming the input) and whose hint
 // carries the usage hint with all three accepted shapes.
-func parseSchemeSegment(segment string) (scheme, mode string, explicitMode bool, rerr *RequestError) {
+func parseSchemeSegment(segment string) (scheme, mode string, rerr *RequestError) {
 	lower := strings.ToLower(segment)
 	scheme, modePart, hasSuffix := strings.Cut(lower, "+")
 
 	switch {
 	case !hasSuffix && (scheme == "http" || scheme == "https"):
-		// Plain form: the query channel keeps v0.1.0 semantics transitionally.
-		// TODO(v0.3): flip the plain form to ModePure per the R5 migration
-		// (version bump + time window, per design D15). Until then plain
-		// resolves to retry mode and ServeHTTP emits the deprecation log
-		// when retry keys are present or a default network retry is consumed.
-		return scheme, ModeRetry, false, nil
+		// Plain form: pure mode (same as "+pure").
+		return scheme, ModePure, nil
 	case hasSuffix && (scheme == "http" || scheme == "https") && modePart == ModeRetry:
-		return scheme, ModeRetry, true, nil
+		return scheme, ModeRetry, nil
 	case hasSuffix && (scheme == "http" || scheme == "https") && modePart == ModePure:
-		return scheme, ModePure, true, nil
+		return scheme, ModePure, nil
 	case segment == "":
 		// "//host/..." — the path's first segment is empty, which the caller
 		// reports as a missing target.
-		return "", "", false, &RequestError{
+		return "", "", &RequestError{
 			Code:   400,
 			Reason: "missing upstream target in path",
 			Hint:   usageHint,
 		}
 	default:
-		return "", "", false, &RequestError{
+		return "", "", &RequestError{
 			Code:   400,
 			Reason: fmt.Sprintf("unsupported scheme %q: only http and https are supported, optionally with a +retry or +pure mode suffix", segment),
 			Hint:   usageHint,

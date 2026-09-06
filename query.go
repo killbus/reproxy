@@ -84,28 +84,6 @@ func SplitQuery(rawQuery string) (upstreamQuery string, retryParams url.Values, 
 	return strings.Join(passthrough, "&"), retryParams, nil
 }
 
-// hasRetryKeys reports whether rawQuery carries ANY retry-namespace key
-// (retry.* / retry[...]). It is a light, inert scan for the deprecation gate
-// (design §5): unlike SplitQuery it never validates, never 400s, and never
-// decodes — unknown or malformed retry keys still count as "present" (the
-// request spelled the namespace; the later SplitQuery in retry mode will
-// produce the precise 400 if the key is actually invalid).
-func hasRetryKeys(rawQuery string) bool {
-	if rawQuery == "" {
-		return false
-	}
-	for _, segment := range strings.Split(rawQuery, "&") {
-		key := segment
-		if i := strings.Index(segment, "="); i >= 0 {
-			key = segment[:i]
-		}
-		if inRetryNamespace(key) {
-			return true
-		}
-	}
-	return false
-}
-
 // inRetryNamespace reports whether a raw key belongs to the retry protocol:
 // it starts with "retry." or "retry[" exactly (retryfoo/myretry.x do not).
 func inRetryNamespace(key string) bool {

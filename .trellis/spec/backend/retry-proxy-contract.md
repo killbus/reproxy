@@ -1,7 +1,7 @@
 # reproxy Protocol Contract
 
 > Executable contract for the retry control-plane channels, mode grammar, and proxy behavior.
-> Source: task 09-04-implement-reproxy-mvp (23/23 mutations) and task 09-04-query-ownership-modes (29/29 mutations; design.md §1–§9, decisions D1–D15).
+> Source: task 09-04-implement-reproxy-mvp (23/23 mutations), task 09-04-query-ownership-modes (29/29 mutations; design.md §1–§9, decisions D1–D15), and task 09-06-no-phantom-migration (3/3 mini-scan; plain scheme → pure terminal, transition layer deleted).
 
 ---
 
@@ -15,11 +15,8 @@ Any change to request parsing, mode/channel resolution, retry policy resolution,
 // query.go — namespace split before any policy work (retry mode only)
 func SplitQuery(rawQuery string) (passthrough string, retryParams url.Values, err *RequestError)
 
-// query.go — inert key scan for the deprecation gate (never 400s, never called twice where SplitQuery runs)
-func hasRetryKeys(rawQuery string) bool
-
-// target.go — path grammar now returns the query-ownership mode
-func ParsePath(escapedPath string) (PathTarget, *RequestError) // PathTarget gains Mode, ExplicitMode
+// target.go — path grammar returns the query-ownership mode
+func ParsePath(escapedPath string) (PathTarget, *RequestError) // PathTarget carries Mode (plain form resolves to pure)
 
 // header.go — header channel: reserved-namespace guard + policy parse
 func ParseRetryPolicyHeader(h http.Header) (url.Values, *RequestError) // nil params = header absent
@@ -38,7 +35,7 @@ func ComputeWait(sp ScopePolicy, attemptNo int, retryAfterHeader string, now tim
 
 ## 3. Contracts
 
-### Request: mode grammar (v0.2)
+### Request: mode grammar
 
 ```
 SCHEME-SEGMENT := SCHEME [ "+" MODE ]    // matched on ORIGINAL ESCAPED bytes
@@ -46,7 +43,7 @@ SCHEME         := "http" | "https"       // case-insensitive, lowercased
 MODE           := "retry" | "pure"       // case-insensitive, lowercased with the scheme
 ```
 
-- Plain scheme → retry mode **transitionally** (v0.2); v0.3 flips to pure (design D15: version bump + time window, not traffic-based).
+- Plain scheme → **pure mode (terminal state)**: query never split, body streams, single attempt. (D15's v0.3 flip criteria are moot — the flip already happened; there was no deployed audience to migrate.)
 - `%2B` is not `+`: `/https%2Bpure/host` is a 400 as the literal segment `https%2Bpure` (original-bytes-first; `ParsePath` receives `r.URL.EscapedPath()` — never "simplify" to `r.URL.Path`).
 - Invalid forms → 400 naming the raw quoted segment; `usageHint` names all three shapes.
 
@@ -74,13 +71,12 @@ X-Reproxy-Retry-Policy: status=5xx; network=1; budget=30s; [*].attempts=3; [429]
 |---|---|---|
 | `+pure` | no | Pure proxy: query verbatim, body streams (no capture), single attempt (literal, D13) |
 | `+pure` | yes | Policy from header; **Capture runs** (replay required — cap/413/degraded revive) |
+| plain | no | Pure mode (same as `+pure`, terminal) |
+| plain | yes | Header channel with pure mode — the intended combo, NOT a conflict |
 | `+retry` | no | v0.1.0 semantics exactly |
 | `+retry` | yes | **400 conflict** — names both channels + remedy + actor source |
-| plain (v0.2) | — | Retry mode + `event=deprecation` when gated (below) |
 
 Invariant: query channel and header channel are mutually exclusive **whenever query-splitting is active** — fail-closed 400, never silent precedence.
-
-### Policy: three-tier field-level resolution
 
 ### Policy: three-tier field-level resolution
 
@@ -102,10 +98,6 @@ built-in defaults -> retry[*].FIELD -> retry[NNN].FIELD
 - `Capture()` exists solely to replay across attempts. `pure ∧ no header ⇒ no Capture` — the body streams to the upstream with **inbound framing preserved** (`req.ContentLength = r.ContentLength`, never unconditionally `-1`/chunked).
 - The headerless-pure policy is `SingleAttemptPolicy(cfg)` — a literal, never `Parse(url.Values{})`: empty input returns the v0.1.0 defaults (3 attempts, network=1) and would smuggle a retry lifecycle into pure mode. The Budget field stays live (feeds per-try TTFB, clamped by `MaxBudget`).
 
-### Deprecation gate (v0.2, plain scheme)
-
-`event=deprecation` fires at most once per plain-scheme request when: any `retry.*`/`retry[` key is present (scan via `hasRetryKeys` — inert, never 400s), **OR** a default network retry was actually consumed (attempt-loop callback). No cross-request state; dedupe is per request.
-
 ### Budget semantics
 
 `retry.budget` is a hard cap over attempts + waits, checked at the loop top (first attempt exempt). Exhaustion commits the held upstream response (delivered as-is, `X-Retry-Exhausted: true`); it never fabricates a response.
@@ -116,7 +108,7 @@ built-in defaults -> retry[*].FIELD -> retry[NNN].FIELD
 |---|---|
 | Unknown `retry.*` key | 400, names the key, lists recognized keys |
 | Unknown scheme-segment form (`https+retrt`, `+`, `+pure+retry`, `https%2Bpure`) | 400 naming the raw quoted segment, hint names all three shapes |
-| `+retry`/plain mode + `X-Reproxy-Retry-Policy` present | 400 conflict — names both channels, remedy (+pure or remove header), actor source (middleware possibility) |
+| `+retry` mode + `X-Reproxy-Retry-Policy` present | 400 conflict — names both channels, remedy (+pure or remove header), actor source (middleware possibility) |
 | Unknown `X-Reproxy-Foo` header | 400 (reserved namespace, every mode) |
 | Multiple `X-Reproxy-Retry-Policy` occurrences | 400 |
 | Degenerate header (empty / `;;` / whitespace-only / missing `=` / empty key) | 400 in every mode — absent is the only no-policy spelling |
@@ -133,6 +125,7 @@ built-in defaults -> retry[*].FIELD -> retry[NNN].FIELD
 - Good: `?retry.status=5xx&retry[*].attempts=4&retry[429].attempts=2` — 429 uses attempts=2, everything else in the gate uses 4.
 - Good: `/https+pure/api.example.com/x?retry.count=5` — collision case: `retry.count` is target data, reaches the upstream verbatim, single attempt.
 - Good: `/https+pure/host` + `X-Reproxy-Retry-Policy: status=5xx; [*].attempts=3` — header policy drives retries, query untouched.
+- Good: `/https/host` + `X-Reproxy-Retry-Policy` — plain form is pure mode: the intended header-channel combo, retries per policy.
 - Base: no retry params in retry mode — pure reverse proxy, zero behavioral overhead.
 - Bad: `?retry.status=429&retry[500].attempts=2` — 400 dead config (500 not in gate).
 - Bad: `/https+retry/host?retry.status=5xx` + policy header — 400 both-channels conflict.
@@ -143,8 +136,8 @@ built-in defaults -> retry[*].FIELD -> retry[NNN].FIELD
 - Mode grammar: `target_test.go` grammar table (3 valid forms × schemes × case variants; invalid forms incl. escaped-`%2B` rows).
 - Mode/channel matrix: `TestProxyModeChannelConflictMatrix` (every §3 row).
 - Pure mode: `TestProxyPureModeQueryVerbatimAndSingleCall`, `TestProxyPureModeBodyStreamsNoCapture` (incl. ContentLength framing assertion), `TestProxyPureModeSingleAttemptLiteralNotParseDefaults`.
+- Plain form: `TestProxyPlainSchemeQueryNeverSplit` — plain never splits the query; `retry.*`-shaped keys reach the upstream verbatim.
 - Header channel: `header_test.go` grammar + degenerate tables, `TestHeaderTransformEquivalence` (query vs header → deep-equal Policy).
-- Deprecation: `TestProxyDeprecationLogGate` (both triggers), `TestProxyPlainSchemeDeprecationDedupeBothTriggers`.
 - Order independence: `TestParseFieldOrderIndependence` (50 iterations — map iteration order must not change the verdict).
 - Dead config: `TestParseDeadConfig` + `TestProxyDeadConfig400`.
 - Mutation lock: every row of the validation matrix has a test that fails when the behavior is broken (see mutation-scan.md in the task dir — 29/29 captured).

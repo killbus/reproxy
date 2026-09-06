@@ -78,10 +78,8 @@ PROXY-TARGET   := "/" SCHEME-SEGMENT "/" AUTHORITY [ "/" RAW-PATH ]
 - `/https+pure/example.com/x` — pure mode, stable forever. The query is never
   touched; the request body streams to the upstream (see below); a single
   attempt is made unless the header channel supplies a policy.
-- `/https/example.com/x` — plain form. **Transitional**: in v0.2 it selects
-  retry mode (v0.1.0 semantics) and logs a deprecation when retry keys are
-  present; in v0.3 it will select pure mode. See
-  [Migration](#migration-plain-scheme-segment).
+- `/https/example.com/x` — plain form: pure mode, same as `+pure` (the plain
+  form is the natural way to say "just proxy this").
 - Anything else (`https!retry`, `rx`, `https+`, `https+retrt`) is a 400 with
   a usage hint naming all three accepted shapes. The mode suffix is matched
   against the original escaped bytes of the path: `%2B` is not `+`.
@@ -97,10 +95,8 @@ Pure mode is a pure reverse proxy:
 - **No retries at all** without the header channel: one attempt, no status
   gate, no network retry. This is an observable difference from v0.1.0, where
   the default `retry.network=1` retried connection failures even with no
-  retry parameters at all — pure mode does not (that default's silent
-  dependents are what the [deprecation log](#migration-plain-scheme-segment)
-  exists to surface). Per-try TTFB bounds still apply (they bound a hang, not
-  a retry).
+  retry parameters at all — pure mode does not. Per-try TTFB bounds still
+  apply (they bound a hang, not a retry).
 - **The request body is never captured.** Capture exists solely to replay a
   body across attempts; one attempt means no replay. There is no 10 MiB cap,
   no 413, no degraded mode, and no `X-Retry-Dropped` — the body simply
@@ -157,7 +153,7 @@ X-Reproxy-Retry-Policy: status=5xx; network=1; budget=30s; [*].attempts=3; [429]
 - `X-Reproxy-*` is a reserved request-header namespace: any other
   `X-Reproxy-Foo` is a 400 (fail closed). All `X-Reproxy-*` headers are
   stripped before the request is forwarded upstream.
-- Using both channels at once — a retry-mode URL (or plain segment) plus the
+- Using both channels at once — a retry-mode URL plus the
   header — is a 400 naming the conflict and the remedy ("remove the header,
   or use a `+pure` path"). If you did not set this header, a middleware or
   gateway between you and reproxy may have added it.
@@ -397,44 +393,6 @@ Client-visible errors use a JSON body:
 
 Status-coded failures from the upstream itself are always relayed as-is — a
 500 from the upstream is the client's answer, not a proxy error.
-
-## Migration: plain scheme segment
-
-Before v0.2, the plain scheme segment (`/https/example.com/x`) was the only
-form and meant "split the query for retry parameters". The mode-suffix grammar
-(`+retry` / `+pure`) made query ownership explicit, so the plain form is now
-transitional:
-
-- **v0.2 (current)**: the plain segment selects **retry mode** — every v0.1.0
-  URL keeps working verbatim, byte for byte. One observable difference exists
-  only on the `+pure` side (which no v0.1.0 URL uses): pure mode does not
-  retry network failures that v0.1.0's default `retry.network=1` did, because
-  pure mode has no retry lifecycle at all.
-- Every plain-segment request that actually exercises the borrow logs one
-  `event=deprecation` line:
-
-  ```
-  event=deprecation target=example.com:443 trigger=retry-keys note="the plain scheme segment selects retry mode only transitionally (v0.2); migrate to /SCHEME+retry/, /SCHEME+pure/, or the X-Reproxy-Retry-Policy header before v0.3"
-  ```
-
-  The trigger is `retry-keys` when any `retry.*`/`retry[` key is present, or
-  `network-retry` when the request silently consumed a default network retry
-  (a zero-retry-parameter request that dialed twice). Both fire one line, not
-  two. A plain-segment request with no retry keys and no network retry
-  consumed logs nothing — its v0.3 behavior is byte-identical anyway.
-- **v0.3 (terminal state)**: the plain segment flips to **pure mode**. The
-  flip criteria are version + time (at least one minor after v0.2 and a
-  release window for operators to watch their `event=deprecation` volume
-  trend to zero), not a traffic metric — an OSS proxy cannot observe its
-  deployers' traffic mix. v0.3 ships a legacy escape hatch
-  (`REPROXY_LEGACY_PLAIN_RETRY=1`, plain segment → retry mode, no
-  deprecation log) for deployers who read the release notes late; it is
-  removed in v0.4.
-
-**How to migrate**: replace `/https/` with `/https+retry/` in any URL that
-passes retry parameters (behavior identical, the log line goes away), or
-`/https+pure/` where the query is target data, or move the policy into the
-`X-Reproxy-Retry-Policy` header on a `+pure` path.
 
 ## Limitations / future work
 

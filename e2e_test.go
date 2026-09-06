@@ -101,7 +101,7 @@ func newE2EEnv(t *testing.T, upstreamHandler http.HandlerFunc, cfg *ServerConfig
 }
 
 // get performs a client GET against the proxy with the given target path
-// (e.g. "/http/up.example.com/x?retry.status=500").
+// (e.g. "/http+retry/up.example.com/x?retry.status=500").
 func (e *e2eEnv) get(t *testing.T, target string) *http.Response {
 	t.Helper()
 	resp, err := e.client.Get(e.proxy.URL + target)
@@ -153,7 +153,7 @@ func (e *e2eEnv) counted(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// TestE2EHappyPathGET: /http/<host>/path?x=1 relays the upstream response
+// TestE2EHappyPathGET: /http+retry/<host>/path?x=1 relays the upstream response
 // with X-Retry-Count: 1 and the original query intact.
 func TestE2EHappyPathGET(t *testing.T) {
 	env := newE2EEnv(t, func(w http.ResponseWriter, r *http.Request) {
@@ -165,7 +165,7 @@ func TestE2EHappyPathGET(t *testing.T) {
 	}, nil)
 	_ = env
 
-	resp := env.get(t, "/http/up.example.com/path?x=1")
+	resp := env.get(t, "/http+retry/up.example.com/path?x=1")
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -191,7 +191,7 @@ func TestE2ERetryToSuccess(t *testing.T) {
 		_, _ = w.Write([]byte("third time"))
 	}, nil)
 
-	resp := env.get(t, "/http/up.example.com/x?retry.status=500&retry[*].attempts=3&retry[*].initial=1ms&retry[*].max=2ms&retry[*].jitter=none")
+	resp := env.get(t, "/http+retry/up.example.com/x?retry.status=500&retry[*].attempts=3&retry[*].initial=1ms&retry[*].max=2ms&retry[*].jitter=none")
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -220,7 +220,7 @@ func TestE2EExhaustionDeliversLastResponse(t *testing.T) {
 		_, _ = w.Write([]byte(fmt.Sprintf("attempt-%d", k)))
 	}, nil)
 
-	resp := env.get(t, "/http/up.example.com/x?retry.status=500&retry[*].attempts=2&retry[*].initial=1ms&retry[*].max=2ms&retry[*].jitter=none")
+	resp := env.get(t, "/http+retry/up.example.com/x?retry.status=500&retry[*].attempts=2&retry[*].initial=1ms&retry[*].max=2ms&retry[*].jitter=none")
 	if resp.StatusCode != 500 {
 		t.Fatalf("status = %d, want 500 (real upstream verdict)", resp.StatusCode)
 	}
@@ -260,7 +260,7 @@ func TestE2EPOSTBodyReplay(t *testing.T) {
 		_, _ = w.Write([]byte("echo:" + string(b)))
 	}, nil)
 
-	resp := env.doReq(t, "POST", "/http/up.example.com/echo?retry.status=500&retry[*].attempts=2&retry[*].initial=1ms&retry[*].max=2ms&retry[*].jitter=none",
+	resp := env.doReq(t, "POST", "/http+retry/up.example.com/echo?retry.status=500&retry[*].attempts=2&retry[*].initial=1ms&retry[*].max=2ms&retry[*].jitter=none",
 		strings.NewReader("hello world"), nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -302,7 +302,7 @@ func TestE2EPOSTOversizedDegraded(t *testing.T) {
 	}, cfg)
 
 	body := "0123456789abcdefghij" // 20 bytes > 16-byte cap
-	resp := env.doReq(t, "POST", "/http/up.example.com/upload?retry.status=500&retry[*].attempts=3",
+	resp := env.doReq(t, "POST", "/http+retry/up.example.com/upload?retry.status=500&retry[*].attempts=3",
 		strings.NewReader(body), nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200 (degraded single pass-through)", resp.StatusCode)
@@ -335,7 +335,7 @@ func TestE2EQueryBytePreservation(t *testing.T) {
 		w.WriteHeader(200)
 	}, nil)
 
-	resp := env.get(t, "/http/up.example.com/p?"+raw+"&retry.status=500&retry[*].attempts=2")
+	resp := env.get(t, "/http+retry/up.example.com/p?"+raw+"&retry.status=500&retry[*].attempts=2")
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -506,7 +506,7 @@ func TestE2EUnknownRetryKey400(t *testing.T) {
 		w.WriteHeader(200)
 	}, nil)
 
-	resp := env.get(t, "/http/up.example.com/x?retry.wat=1")
+	resp := env.get(t, "/http+retry/up.example.com/x?retry.wat=1")
 	if resp.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
@@ -530,7 +530,7 @@ func TestE2EDeadConfig400(t *testing.T) {
 		w.WriteHeader(200)
 	}, nil)
 
-	resp := env.get(t, "/http/up.example.com/x?retry.status=500&retry[429].attempts=4")
+	resp := env.get(t, "/http+retry/up.example.com/x?retry.status=500&retry[429].attempts=4")
 	if resp.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
@@ -559,7 +559,7 @@ func TestE2EBudgetExhaustion(t *testing.T) {
 	}, nil)
 
 	start := time.Now()
-	resp := env.get(t, "/http/up.example.com/x?retry.status=500&retry.budget=100ms&retry[*].attempts=10&retry[*].initial=5s&retry[*].max=10s&retry[*].jitter=none")
+	resp := env.get(t, "/http+retry/up.example.com/x?retry.status=500&retry.budget=100ms&retry[*].attempts=10&retry[*].initial=5s&retry[*].max=10s&retry[*].jitter=none")
 	elapsed := time.Since(start)
 	defer bodyString(t, resp)
 
@@ -728,8 +728,9 @@ func TestE2EHeadersStrippedUpstream(t *testing.T) {
 	}
 	bodyString(t, resp)
 
-	// +retry: namespace guard rejects unknown members, so exercise the strip
-	// with only the (conflicting-free) plain form and a lookalike header.
+	// Plain form (pure mode): a lookalike outside the reserved namespace is
+	// client data and must pass through, exercising the strip with ordinary
+	// traffic.
 	hdr2 := http.Header{}
 	hdr2.Set("X-Reproxyx-Lookalike", "data")
 	resp2 := env.doReq(t, "GET", "/http/up.example.com/x", nil, hdr2)
@@ -836,8 +837,9 @@ func TestE2EPureModeHeaderPolicyBodyReplayE2E(t *testing.T) {
 }
 
 // TestE2EModeChannelConflictOverTCP: the conflict 400 (query channel active
-// + policy header present) over a real listener, on both the plain form
-// (v0.2: retry mode transitionally) and the explicit +retry form.
+// + policy header present) over a real listener, on the +retry form (the
+// only mode where query-splitting is active; the plain form is pure mode,
+// where the header channel is the intended combination).
 func TestE2EModeChannelConflictOverTCP(t *testing.T) {
 	env := newE2EEnv(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("upstream must not be reached for a channel conflict")
@@ -848,7 +850,6 @@ func TestE2EModeChannelConflictOverTCP(t *testing.T) {
 	hdr.Set(RetryPolicyHeader, "status=5xx")
 	for _, target := range []string{
 		"/http+retry/up.example.com/x?retry.status=500",
-		"/http/up.example.com/x?retry.status=500", // plain selects retry mode in v0.2
 	} {
 		resp := env.doReq(t, "GET", target, nil, hdr)
 		if resp.StatusCode != 400 {
