@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 3
-- **Last Active**: 2026-09-04
+- **Total Sessions**: 4
+- **Last Active**: 2026-09-07
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~81 | Active |
+| `journal-1.md` | ~131 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 4 | 2026-09-07 | Docker smoke extraction: contract gets an address in the repo | `6284f20` | `main` |
 | 3 | 2026-09-04 | Project close-out: bootstrap spec completion, CI, v0.1.0, scaffold tracking | `9b39e94`, `64d9839`, `7a2132f`, `22531f9` | `main` |
 | 2 | 2026-09-04 | Implement reproxy MVP: check round, mutation scan, spec capture | `0a7b76a`, `425e9d6`, `be24540`, `00a57e5`, `4068f78`, `02f6ee1` | `main` |
 | 1 | 2026-09-03 | TEAM B audit: retry reverse proxy design & tech path | `f4f3775` | `main` |

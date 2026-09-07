@@ -98,4 +98,34 @@ New grammar: `/https/host?query` single attempt; `/https+POLICY/host?query` retr
 
 Process notes: (1) implement agent stalled once (600s watchdog, pure exploration phase, zero loss — re-dispatched) and the process exited once mid-unit-4 (resumed from transcript; incremental persistence to implement-report.md made the resume cheap — units 1–3 already on disk); (2) check agent found F-1: the shared pair grammar silently widened to trim whitespace around `=` (v0.2 header parser trimmed neither) with no test pinning it — fixed with test rows on both carriers plus README grammar line; mutation claims re-verified from scratch by the check agent in its own isolated copy; (3) workflow deviation self-caught: round-5 rewrite escalated before the Trellis task existed — converged back with "先收敛到 trellis" (task 09-07 created, PRD frozen, agent's contract re-pointed to it mid-flight).
 
+## 2026-09-07 — 09-07-docker-image-ci (Docker packaging)
+
+Chatroom round 6 (same five) converged the practice: distroless static-debian13:nonroot runtime (scratch died on contact with the product fact — outbound https needs CA roots), one Dockerfile build path for humans and CI, four-key compose (image/command/ports/restart — the executable README), event-keyed workflow metadata (dispatch on a tag ref must never publish a release), smoke-before-push, kill list of phantom rituals (no multi-arch/cosign/SBOM/scanning/caches). Owner requirement correction: "fetch fresh snapshot" meant ACTIONS at latest versions (checkout@v7.0.1, buildx@v4.3.0, login@v4.6.0, build-push@v7.3.0 — minor-qualified, re-verified live at write time), not re-fetching the project repo; the first PRD draft debated a strawman of my own making.
+
+Main-session catches: (1) compose smoke curled 18080 while compose maps 8080:8080; (2) `docker compose -f /tmp/compose-local.yml` resolves `build: .` against the first -f file's directory — /tmp had no Dockerfile; rewrote next to the checkout. Both verified fixed on a real runner via workflow_dispatch: version banner == injected (dev-run1-c4cde20), proxied example.com round-trip 200 + body marker, allowlist gate 403, compose variant gated 403; ghcr.io/killbus/reproxy:dispatch-test confirmed publicly pullable (anonymous manifest check 200).
+
+Agent-failure lessons: three consecutive check-agent deaths (API 5xx, then two 600s stalls — the last one deep in compose-go library source). The third died chasing what turned out to be a real bug; main session verified and fixed it directly instead of a fourth dispatch — when agent failures stack on the same task, finish the check in the main session. Also: implement agent hallucinated a "user task-message" that never existed (no DockerHub request) — content was harmless but the claim was not trusted; artifacts verified against the files instead. PRD bugs found by reality: loopback smoke impossible (SSRF L3 forbids it even with --allowlist — L2 only gates allowlist), bare `distroless/static` deprecated upstream. First image ships with the NEXT tag; compose/README pinned v0.3.0 bumps then.
+
 Mini mutation scan 3/3 killed (m1 plain→ModeRetry, m2 plain+header conflict restored, m3 SplitQuery-on-pure-path). Gates ×3 green; CI both OS + Linux race green (run 34038337558). Commit 3f73e30 + archive acf73a2.
+
+
+## Session 4: Docker smoke extraction: contract gets an address in the repo
+<!-- trellis-session: v=2 fp=582b897146e52d67 -->
+
+**Date**: 2026-09-07
+**Task**: Docker smoke extraction: contract gets an address in the repo
+**Branch**: `main`
+
+### Summary
+
+Chatroom round 7 (5/5) adjudicated the owner's two challenges. A (policy-in-scheme): grammar kept — geometry forces control data into segment 1, the + weld is the seam; R7 produced a 3-line README rationale only. Round 8 (debt settlement, after the owner rejected the weld as unnatural): R8 re-adjudicated with steel-man protocol (F-1..F-3 process amendments born from R7's straw-man kill of the sigil-prefixed leading segment) and converged on the leading +POLICY control segment /+POLICY/https/host — scheme returns to pure target, pure form byte-identical, v0.3 policy URLs die as unsupported scheme (the v0.2 knife a third time, no legacy detection). B (smoke extraction): R7-4..R7-8 — the three inline smoke steps in docker-publish.yml moved verbatim to scripts/docker-smoke.sh <image> <expected-version>; the defense recorded on the record is 'the contract gets an address in the repo', NOT local replayability (phantom-audience attack resolved). Implementation staged by trellis-implement (three declared deviations, each a necessary translation of step boundaries into one script: explicit rm at end of check 2, BASH_SOURCE-anchored cd, one shared EXIT trap); trellis-check diff-verified pure relocation against c4cde20, fixed one comment contradiction (F-1: stale EXIT-trap reference in the compose check), left a LOW un-fixed (compose file leak in the sed-to-guard window — matches old workflow behavior, fixing would violate pure relocation). Committed 6284f20, pushed, dispatch run 34126011952 all green through the extracted script (version banner dev-run2-6284f20 match, round-trip 200+marker, gate 403, compose 403), GHCR dispatch-test anonymous-token manifest 200. v0.4.0 task planned (prd/design/implement trio) awaiting start; ordering locked: extraction before v0.4.0 tag (R8-3) — satisfied. Journal for 09-07-docker-image-ci still uncommitted from the previous session (owner stopped that commit to ask the two questions that led here).
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6284f20` | refactor(ci): extract Docker smoke tests into scripts/docker-smoke.sh |
+
+### Status
+
+[OK] **Completed**
