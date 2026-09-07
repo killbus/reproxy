@@ -1,13 +1,13 @@
 # reproxy
 
 reproxy is a lightweight, stateless, general-purpose HTTP retry reverse proxy.
-The upstream destination is expressed in the request path and the retry policy
-is expressed in query parameters or headers, so any client that can build a URL
-can ask for retries on a per-request basis — no sidecar config files, no
-per-route server configuration. It ships as a single Go binary built on the
-standard library only (zero external dependencies), streams request and
-response bodies (including `text/event-stream`), and enforces server-side
-destination restrictions so it cannot be used as an open relay.
+The upstream destination and (optionally) the retry policy are both expressed
+in the request path, so any client that can build a URL can ask for retries on
+a per-request basis — no sidecar config files, no per-route server
+configuration. It ships as a single Go binary built on the standard library
+only (zero external dependencies), streams request and response bodies
+(including `text/event-stream`), and enforces server-side destination
+restrictions so it cannot be used as an open relay.
 
 ## Quick start
 
@@ -17,7 +17,7 @@ go build ./cmd/reproxy        # produces ./reproxy
 ```
 
 ```sh
-curl "http://localhost:8080/https+retry/example.com/api?retry.status=500,502-504&retry[*].attempts=3"
+curl "http://localhost:8080/https+status=500,502-504;*.attempts=3/example.com/api"
 ```
 
 The server refuses to start with an empty allowlist unless `--dangerous-allow-all`
@@ -25,17 +25,17 @@ is passed (see [Security](#security)).
 
 ## How it works
 
-The request path carries the upstream target; the query and (optionally)
-headers carry the retry policy and the data passed through to the upstream:
+The request path carries the upstream target and, after a `+`, the retry
+policy. The query belongs to the target and is always forwarded untouched:
 
 ```
-/<scheme>[+<mode>]/<host>[:port]/<path>?<query>
+/<scheme>[+<policy>]/<host>[:port]/<path>?<query>
 ```
 
 - `<scheme>` is `http` or `https`; anything else is a 400.
-- `<mode>` is optional: `retry` or `pure` (see [Query ownership and
-  modes](#query-ownership-and-modes) below — the `+` is a **mode modifier on
-  the scheme**, not a transport selector).
+- `<policy>` is a retry policy (see below). Its absence — a plain
+  `/https/host/...` path — means single attempt, no retry. Absent is the only
+  no-policy spelling: a bare `+` or an unparseable policy body is a 400.
 - Default ports: `http` → 80, `https` → 443. An explicit port wins. Ports must
   be 1–65535 in plain decimal; leading zeros are rejected.
 - `<host>` may be a DNS name, an IPv4 literal, or a bracketed IPv6 literal
@@ -45,158 +45,113 @@ headers carry the retry policy and the data passed through to the upstream:
   `https://h/`.
 - The path is forwarded **as raw bytes** — never decoded or re-encoded — so
   canonical encodings required by signed URLs survive intact. This includes
-  the scheme segment: `%2B` is not `+`, so `/https%2Bpure/host/...` is not a
-  mode-qualified scheme — it fails scheme validation as the literal segment
-  `https%2Bpure`.
+  the scheme segment: `%2B` is not `+`, so `/https%2Bstatus=5xx/host/...` is
+  not a policy-carrying path — it fails scheme validation as the literal
+  segment `https%2Bstatus=5xx`.
+- The scheme part is case-insensitive (`/HTTPS/...` works); the policy body
+  after `+` is matched on original bytes and is case-sensitive.
 
-## Query ownership and modes
+## The retry policy
 
-**The query belongs to the target; the proxy borrows it only when told to.**
-`retry` is a common English word and a normal query-parameter name — an
-upstream's own API may legitimately use `retry.count` or `retry.token`.
-reproxy therefore offers three channels, and the mode decides who owns the
-query:
-
-| Channel | URL form | Query | Who carries the policy |
-|---|---|---|---|
-| **Pure mode** (query-pure) | `/https+pure/host/...` | Belongs to the target, forwarded byte-identical, never parsed | Nobody (single attempt), or the [header channel](#the-header-channel-x-reproxy-retry-policy) |
-| **Retry mode** (URL channel) | `/https+retry/host/...` | Split: `retry.*`/`retry[` claimed as policy, rest forwarded byte-identical | Query parameters |
-| **Header channel** | `/https+pure/host/...` + `X-Reproxy-Retry-Policy` | Belongs to the target, forwarded byte-identical, never parsed | Request header |
-
-The mode-suffix grammar:
+A policy is a semicolon-separated list of `key=value` pairs, with optional
+whitespace around pairs and around the `=`. Two carriers accept the same
+grammar:
 
 ```
-SCHEME-SEGMENT := SCHEME [ "+" MODE ]
-SCHEME         := "http" | "https"          (case-insensitive, lowercased)
-MODE           := "retry" | "pure"          (case-insensitive, lowercased with the scheme)
-
-PROXY-TARGET   := "/" SCHEME-SEGMENT "/" AUTHORITY [ "/" RAW-PATH ]
+/https+status=5xx;*.attempts=3;429.attempts=5/host/path?query   (path segment)
+X-Reproxy-Retry-Policy: status=5xx; [*].attempts=3; [429].attempts=5   (header)
 ```
 
-- `/https+retry/example.com/x` — retry mode, stable forever. Query splits per
-  [retry mode semantics](#retry-mode-semantics).
-- `/https+pure/example.com/x` — pure mode, stable forever. The query is never
-  touched; the request body streams to the upstream (see below); a single
-  attempt is made unless the header channel supplies a policy.
-- `/https/example.com/x` — plain form: pure mode, same as `+pure` (the plain
-  form is the natural way to say "just proxy this").
-- Anything else (`https!retry`, `rx`, `https+`, `https+retrt`) is a 400 with
-  a usage hint naming all three accepted shapes. The mode suffix is matched
-  against the original escaped bytes of the path: `%2B` is not `+`.
+- **Path segment** — the policy rides the scheme segment after a `+`. Scope
+  keys are dotted (`*.attempts`, `429.attempts`) because brackets are illegal
+  in a path segment; gates are bare words (`status`, `network`, `budget`).
+- **Header** — `X-Reproxy-Retry-Policy` carries the same policy with bracketed
+  scope spellings (`[*].attempts`, `[429].attempts`), which are legal in a
+  header value. See [the header channel](#the-header-channel-x-reproxy-retry-policy).
 
-The three channels are peers, each natural for a different author: the mode
-suffix declares who owns the query (a contract about the URL itself), the
-query channel carries policy that travels with the string, and the header
-channel carries policy set at the sending end. A third mode value, if one is
-ever added, would name a new ownership contract (e.g. reproxy claiming
-another query namespace) — it extends the two-value list by design decision,
-the same way retry and pure were added. Anything expressible as a retry
-field (how many attempts, which statuses) is policy, and lives in the query
-or header channel. The mode list is closed; there is no user-defined
+The two carriers map onto the same field set and feed the same validation, so
+every check — unknown keys, bad values, dead configurations — produces the
+same 400 bodies either way. A key that is neither a gate nor a dotted scope
+(`*.FIELD` with FIELD known, `NNN.FIELD` with NNN a 3-digit code) is rejected
+as an unknown policy field; there is no other `+` vocabulary and no
 identifier slot.
 
-### Pure mode semantics
+The two carriers are **mutually exclusive**: a policy in the path segment plus
+the header is a 400 naming both channels and the remedy. The plain path plus
+the header is the intended header-channel combination, not a conflict.
 
-Pure mode is a pure reverse proxy:
+### Plain path semantics
 
-- **The query is never split.** `RawQuery` is forwarded byte-identical —
+`/https/host/...` with no policy anywhere is a pure reverse proxy:
+
+- **The query is never inspected.** `RawQuery` is forwarded byte-identical —
   including `retry.`-prefixed keys that are the target's own data. The
   headline case: an upstream API with a `retry.count` parameter receives it
-  verbatim through `/https+pure/...`.
-- **No retries at all** without the header channel: one attempt, no status
-  gate, no network retry. This is an observable difference from v0.1.0, where
-  the default `retry.network=1` retried connection failures even with no
-  retry parameters at all — pure mode does not. Per-try TTFB bounds still
-  apply (they bound a hang, not a retry).
+  verbatim through `/https/...?retry.count=7`.
+- **No retries at all** — one attempt, no status gate, no network retry.
+  (Per-try TTFB bounds still apply: they bound a hang, not a retry.)
 - **The request body is never captured.** Capture exists solely to replay a
   body across attempts; one attempt means no replay. There is no 10 MiB cap,
   no 413, no degraded mode, and no `X-Retry-Dropped` — the body simply
   streams to the upstream, which is also faster (no double-buffering).
 - **No `X-Retry-*` response headers** — there is no retry lifecycle to report.
 - SSRF protections (allowlist, resolve-then-pin, forbidden-IP checks, no
-  redirect following) apply identically in every mode.
+  redirect following) apply identically with or without a policy.
 
-Exception: adding `X-Reproxy-Retry-Policy` to a `+pure` route re-enables
-body capture, because the requested policy needs a replayable body. The full
-capture machinery comes back with it: the 10 MiB cap, 413 in strict mode, the
-degraded pass-through, and `X-Retry-Dropped` on the response. Adding the
-header to a `+pure` route is not free.
-
-### Retry mode semantics
-
-Retry mode is the v0.1.0 behavior exactly. The query is split into two
-namespaces:
-
-- Everything starting with `retry.` or `retry[` is a retry parameter. It is
-  stripped and never reaches the upstream.
-- Everything else is passed through with its **original byte order and
-  encoding** — no parse/re-serialize round trip. Valueless keys (`?a&b`),
-  empty values (`a=`), duplicate keys, `%2F`-style escapes, and `+` all
-  round-trip byte-identically.
-- An unrecognized retry key (e.g. `retry.wat=1`) is a 400 naming the key.
-
-> Upstream APIs that decode query keys have an encoded escape hatch: in retry
-> mode, `retry%2Ecount` passes through byte-wise, so only decoding upstreams
-> interpret it as `retry.count`. It is documented here for completeness — the
-> structural fix is `+pure`, which needs no encoding tricks.
+Adding a policy (either carrier) re-enables body capture, because the
+requested policy may need a replayable body. The full capture machinery comes
+back with it: the 10 MiB cap, 413 in strict mode, the degraded pass-through,
+and `X-Retry-Dropped` on the response. Asking for retries is not free.
 
 ### The header channel (`X-Reproxy-Retry-Policy`)
 
 For programmatic clients that can set headers, the policy can travel
-out-of-band. The query is then never split regardless of mode — the two
-channels are **mutually exclusive**:
+out-of-band, leaving the path plain:
 
 ```
 X-Reproxy-Retry-Policy: status=5xx; network=1; budget=30s; [*].attempts=3; [429].attempts=5
 ```
 
-- The value is a semicolon-separated list of `key=value` pairs; whitespace
-  around pairs is optional. Keys are spelled exactly as the query channel's
-  post-`retry.` remainder: gates (`status`, `network`, `budget`) and scope
-  fields (`[*].attempts`, `[429].attempts`). Values use the same grammar as
-  the query channel, so the full validation matrix — unknown keys, bad
-  values, dead configurations — produces the same 400 bodies.
+- The value uses the shared pair grammar with bracketed scope spellings.
+  Keys are case-sensitive; values are taken literally (never URL-decoded —
+  header values are plain text). No legitimate value needs `;` or `=`, so
+  the pair split stays unambiguous.
 - An **absent header is the only "no policy" spelling**. A present-but-empty
-  value, whitespace-only content, or an empty pair (`;;`) is a 400 in every
-  mode: degenerate input must never read as "default policy".
+  value, whitespace-only content, or an empty pair (`;;`) is a 400 on every
+  request: degenerate input must never read as "default policy".
 - Exactly one occurrence is allowed; multiple `X-Reproxy-Retry-Policy`
   headers are a 400.
 - `X-Reproxy-*` is a reserved request-header namespace: any other
-  `X-Reproxy-Foo` is a 400 (fail closed). All `X-Reproxy-*` headers are
-  stripped before the request is forwarded upstream.
-- Using both channels at once — a retry-mode URL plus the
+  `X-Reproxy-Foo` is a 400 (fail closed), on every request regardless of
+  carrier. All `X-Reproxy-*` headers are stripped before the request is
+  forwarded upstream.
+- Using both carriers at once — a policy in the path segment plus the
   header — is a 400 naming the conflict and the remedy ("remove the header,
-  or use a `+pure` path"). If you did not set this header, a middleware or
-  gateway between you and reproxy may have added it.
+  or drop the policy from the path"). If you did not set this header, a
+  middleware or gateway between you and reproxy may have added it.
 
-The intended collision-free combination is `+pure` + header: the query stays
-target-owned, and the policy travels out-of-band. In that combination the
-body capture machinery is revived (see pure-mode semantics above), and the
-response carries `X-Retry-*` headers reporting the header-driven lifecycle.
+## Retry fields
 
-## Retry parameters
-
-| Parameter | Scope | Meaning | Default | Validation |
+| Field | Scope | Meaning | Default | Validation |
 |---|---|---|---|---|
-| `retry.status` | global | Which upstream statuses trigger a retry (the gate) | empty (no status retries) | exact codes, closed ranges, or class shorthand — see below |
-| `retry.network` | global | Retry network failures (dial/TLS/write/TTFB timeout) | `1` | `0` or `1` |
-| `retry.budget` | global | Hard cap on the total retry lifecycle (all attempts + waits) | `30s` | duration with unit, > 0 |
-| `retry[*].attempts` | default scope | Total attempts including the first | `3` | integer ≥ 1 |
-| `retry[*].backoff` | default scope | Wait curve: `constant` \| `linear` \| `exponential` | `exponential` | one of the three |
-| `retry[*].initial` | default scope | Base wait | `1s` | duration with unit, > 0 |
-| `retry[*].max` | default scope | Cap on a single computed wait | `8s` | duration with unit, ≥ `initial` |
-| `retry[*].jitter` | default scope | `none` \| `full` \| `equal` | `full` | one of the three |
-| `retry[*].retry_after` | default scope | `honor` \| `ignore` upstream `Retry-After` | `honor` | one of the two |
-| `retry[NNN].<field>` | per-status | Override any field above **for retries triggered by status NNN** | — | `NNN` is an exact 3-digit code, 100–599 |
+| `status` | global | Which upstream statuses trigger a retry (the gate) | empty (no status retries) | exact codes, closed ranges, or class shorthand — see below |
+| `network` | global | Retry network failures (dial/TLS/write/TTFB timeout) | `1` | `0` or `1` |
+| `budget` | global | Hard cap on the total retry lifecycle (all attempts + waits) | `30s` | duration with unit, > 0 |
+| `*.attempts` | default scope | Total attempts including the first | `3` | integer ≥ 1 |
+| `*.backoff` | default scope | Wait curve: `constant` \| `linear` \| `exponential` | `exponential` | one of the three |
+| `*.initial` | default scope | Base wait | `1s` | duration with unit, > 0 |
+| `*.max` | default scope | Cap on a single computed wait | `8s` | duration with unit, ≥ `*.initial` |
+| `*.jitter` | default scope | `none` \| `full` \| `equal` | `full` | one of the three |
+| `*.retry_after` | default scope | `honor` \| `ignore` upstream `Retry-After` | `honor` | one of the two |
+| `NNN.<field>` | per-status | Override any field above **for retries triggered by status NNN** | — | `NNN` is an exact 3-digit code, 100–599 |
 
-(These keys and their `X-Reproxy-Retry-Policy` equivalents are the query
-channel; see [the header channel](#the-header-channel-x-reproxy-retry-policy)
-for the out-of-band spelling.)
+In the header carrier the scope spellings are bracketed: `[*].attempts`,
+`[429].attempts`.
 
-`retry.status` accepts a comma-separated list of exact codes (`429,500`),
-closed ranges (`500-599`), and class shorthand (`5xx`, `5XX`). Overlaps and
-duplicates union silently. Reversed ranges, whitespace, empty items, and codes
-outside 100–599 are 400s.
+`status` accepts a comma-separated list of exact codes (`429,500`), closed
+ranges (`500-599`), and class shorthand (`5xx`, `5XX`). Overlaps and
+duplicates union silently. Reversed ranges, whitespace, empty items, and
+codes outside 100–599 are 400s.
 
 Durations require a unit (`1s`, `100ms`, `1.5s`); a bare number is a 400.
 
@@ -205,27 +160,28 @@ Durations require a unit (`1s`, `100ms`, `1.5s`); a bare number is a 400.
 Fields resolve through a three-tier chain with field-level override:
 
 ```
-built-in default  ->  retry[*].FIELD  ->  retry[NNN].FIELD
+built-in default  ->  *.FIELD  ->  NNN.FIELD
 ```
 
-Each tier overrides only the fields it names. `retry[429].initial=100ms`
-changes the wait for 429-triggered retries only; every other field keeps the
-`retry[*]` (or built-in) value.
+Each tier overrides only the fields it names. `429.initial=100ms` changes the
+wait for 429-triggered retries only; every other field keeps the `*` (or
+built-in) value.
 
-Gates and budget live only at the global level — `retry[429].status` or
-`retry[500].budget` are 400s.
+Gates and budget live only at the global level — `429.status` or
+`500.budget` are 400s.
 
 ### Server clamps
 
 Server flags narrow, never widen: `--max-attempts` caps `attempts` (in every
-scope) and `--max-budget` caps `retry.budget`. A request asking for more is
+scope) and `--max-budget` caps `budget`. A request asking for more is
 silently clamped down to the server cap.
 
 ### Dead configurations
 
-Gates and shaping are separate: `retry[429].attempts=4` with 429 **not** in
-`retry.status` can never take effect, so it is a 400 rather than a silently
-ignored parameter. Every invalid value produces a 400 naming the offending key.
+Gates and shaping are separate: `429.attempts=4` with 429 **not** in the
+`status` gate can never take effect, so it is a 400 rather than a silently
+ignored parameter. Every invalid value produces a 400 naming the offending
+key.
 
 ## `attempts` semantics
 
@@ -274,7 +230,7 @@ delay-seconds and HTTP-date (a date in the past means zero delay).
 
 ### Budget
 
-`retry.budget` is a hard cap over the whole lifecycle: every attempt plus every
+`budget` is a hard cap over the whole lifecycle: every attempt plus every
 wait. When the remaining budget cannot cover the next wait, the retry loop
 stops and the client receives the last upstream response (flagged exhausted),
 or a 504 if every attempt failed on the network. Each attempt's wait for
@@ -290,14 +246,14 @@ response headers is additionally bounded by a 30s time-to-first-byte cap
 | `X-Retry-Exhausted` | `1` when attempts or budget ran out on retryable failures |
 | `X-Retry-Dropped` | `body-too-large` when the body exceeded the capture cap and retry was skipped (see below) |
 
-These are emitted only when a retry lifecycle exists — retry mode, or pure
-mode with a header policy. Headerless pure mode emits none of them: a single
-attempt with no gates is not a retry lifecycle.
+These are emitted only when a retry lifecycle exists — that is, when a
+policy was present (either carrier). The policy-less path emits none of
+them: a single attempt with no gates is not a retry lifecycle.
 
 Every retry is also logged with the attempt number, triggering status, wait,
 and remaining budget. The per-request summary line (`event=request`) carries
-the query-ownership mode (`mode=pure` / `mode=retry`) so operators can watch
-their channel mix.
+the policy's carrier (`policy=segment` / `policy=header` / `policy=none`) so
+operators can watch their channel mix.
 
 ## HTTP conformance notes
 
@@ -308,7 +264,7 @@ their channel mix.
   `X-Forwarded-Host` are appended, preserving any existing chain entries.
 - **Non-idempotent replay is opt-in.** RFC 9110 §9.2.2 says a proxy MUST NOT
   automatically retry non-idempotent requests. reproxy only retries a POST when
-  the client explicitly passed retry parameters — passing retry parameters on a
+  the client explicitly passed a retry policy — passing a policy on a
   non-idempotent request constitutes informed consent to replay. The proxy
   discloses every replay via `X-Retry-Count`; be aware a retried POST may have
   side effects at the upstream (duplicate processing, duplicate charges).
@@ -326,12 +282,11 @@ their channel mix.
 - **Redirects are relayed, never followed.** A 3xx from the upstream reaches
   the client unchanged.
 - **Request bodies are captured for replay** up to `--max-body` (default
-  10 MiB) — in retry mode and in pure mode with a header policy (the two
-  cases where replay is possible). A body over the cap is not retried: in
-  the default mode it is streamed through once with
-  `X-Retry-Dropped: body-too-large` (and a warn log); with
-  `--strict-body-limit` the request is rejected with 413. Headerless pure
-  mode never captures the body (nothing to replay), so no cap applies there
+  10 MiB) whenever a policy is present (replay is possible exactly then). A
+  body over the cap is not retried: in the default mode it is streamed
+  through once with `X-Retry-Dropped: body-too-large` (and a warn log); with
+  `--strict-body-limit` the request is rejected with 413. The policy-less
+  path never captures the body (nothing to replay), so no cap applies there
   at all.
 
 ## Security
@@ -378,9 +333,9 @@ certificate validation.
 | `--listen` | `:8080` | Listen address (`host:port`) |
 | `--allowlist` | empty | Comma-separated destination allowlist (repeatable): exact hostnames and `*.suffix` wildcards |
 | `--max-attempts` | `10` | Server cap on total attempts per request (clamps `attempts` down) |
-| `--max-budget` | `30s` | Server cap on the retry lifecycle (clamps `retry.budget` down) |
-| `--max-body` | `10485760` (10 MiB) | Request body capture cap in bytes; larger bodies are not retried (applies in retry mode and `+pure` + header; headerless pure mode never captures) |
-| `--strict-body-limit` | `false` | Reject oversized request bodies with 413 instead of degrading to pass-through (retry mode and `+pure` + header only) |
+| `--max-budget` | `30s` | Server cap on the retry lifecycle (clamps `budget` down) |
+| `--max-body` | `10485760` (10 MiB) | Request body capture cap in bytes; larger bodies are not retried (applies whenever a policy is present; the policy-less path never captures) |
+| `--strict-body-limit` | `false` | Reject oversized request bodies with 413 instead of degrading to pass-through (whenever a policy is present) |
 | `--dangerous-allow-all` | `false` | Disable the destination allowlist (open relay exposure) |
 
 The server waits up to 10s for request headers (slowloris guard) and shuts
@@ -391,28 +346,38 @@ down gracefully on SIGINT/SIGTERM, draining in-flight requests for up to 10s.
 Client-visible errors use a JSON body:
 
 ```json
-{"error": "unknown retry parameter \"retry.wat\"", "hint": "recognized keys: ..."}
+{"error": "unknown policy field \"wat\"", "hint": "policy keys are status, network, budget, *.FIELD, or NNN.FIELD ..."}
 ```
 
 | Status | When |
 |---|---|
-| `400` | Malformed target path (including a malformed mode suffix), unknown/invalid retry parameter, dead configuration (e.g. `retry[429]` without 429 in `retry.status`), both channels used at once, unknown or degenerate `X-Reproxy-*` header |
+| `400` | Malformed target path, unknown/invalid policy field, dead configuration (e.g. a `429.*` scope without 429 in the `status` gate), both policy carriers used at once, unknown or degenerate `X-Reproxy-*` header |
 | `403` | Host not in the allowlist; target resolves to (or is) a forbidden address |
-| `413` | Request body over the cap in `--strict-body-limit` mode (retry mode or `+pure` + header) |
+| `413` | Request body over the cap in `--strict-body-limit` mode (when a policy is present) |
 | `502` | Upstream hostname could not be resolved |
 | `504` | All attempts failed on the network, or the budget ran out with no upstream response to deliver |
 
 Status-coded failures from the upstream itself are always relayed as-is — a
 500 from the upstream is the client's answer, not a proxy error.
 
+## Stability note
+
+An earlier grammar put a mode word (`+retry` / `+pure`) in the scheme
+segment's `+` slot and promised it stable forever; that promise was made
+before any user depended on it and is withdrawn in favor of the simpler
+zero-mode grammar documented here. The `+` slot now speaks only retry
+policy. This is a documentation-level history note: the runtime has no
+compatibility mode and no special-casing for the earlier spellings — a word
+there that is not a policy key is a plain unknown-field 400.
+
 ## Limitations / future work
 
 Excluded from the current scope (recorded for future work):
 
 - temp-file spooling (oversized bodies degrade to pass-through instead)
-- request-body streaming pass-through (tee mode) outside pure mode
+- request-body streaming pass-through (tee mode) alongside capture
 - hold-headers-until-first-byte
-- `5xx` class scopes for `retry[NNN]` (per-status scopes are exact codes only; class shorthand works in `retry.status`)
+- `5xx` class scopes for `NNN.*` (per-status scopes are exact codes only; class shorthand works in the `status` gate)
 - decorrelated jitter
 - multi-upstream load balancing / failover
 - circuit breaking / retry budgets

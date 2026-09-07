@@ -28,6 +28,39 @@ type ScopePolicy struct {
 	RetryAfter string
 }
 
+// gateKeys are the policy keys that configure retry conditions (gates) rather
+// than retry shaping (scope fields). They live only at the global level.
+var gateKeys = map[string]bool{
+	"status":  true,
+	"network": true,
+	"budget":  true,
+}
+
+// scopeFields are the policy fields recognized inside retry[*].FIELD and
+// retry[NNN].FIELD scopes. FIELD is validated here (fail closed with a 400
+// naming the key); see applyScopeField for value parsing.
+var scopeFields = map[string]bool{
+	"attempts":    true,
+	"backoff":     true,
+	"initial":     true,
+	"max":         true,
+	"jitter":      true,
+	"retry_after": true,
+}
+
+// isDigits reports whether s is non-empty and all decimal digits.
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // Defaults for ScopePolicy fields.
 const (
 	DefaultAttempts   = 3
@@ -82,8 +115,9 @@ func (p Policy) RetryableStatus(status int) bool {
 	return false
 }
 
-// Parse builds a Policy from the retry-namespace query parameters produced by
-// SplitQuery.
+// Parse builds a Policy from the retry-namespace url.Values produced by the
+// policy carriers (the scheme segment and the policy header both transform
+// into this shape).
 //
 // Resolution is a three-tier chain with field-level override:
 //
@@ -115,7 +149,7 @@ func Parse(params url.Values, cfg *ServerConfig) (Policy, *RequestError) {
 	}
 
 	// First pass: gates and the default scope, validating every key shape so
-	// nothing passes through unvalidated (fail closed, mirroring SplitQuery).
+	// nothing passes through unvalidated (fail closed).
 	for key, vals := range params {
 		if len(vals) == 0 {
 			continue
@@ -220,17 +254,18 @@ func Parse(params url.Values, cfg *ServerConfig) (Policy, *RequestError) {
 	return policy, nil
 }
 
-// SingleAttemptPolicy returns the pure-mode, headerless policy: exactly one
-// attempt, every retry gate off (design D13). It is a LITERAL — never
+// SingleAttemptPolicy returns the no-policy policy: exactly one attempt,
+// every retry gate off (design D13). It is a LITERAL — never
 // Parse(url.Values{}), which returns the v0.1.0 defaults (3 attempts,
-// network=1, 30s budget) and would smuggle a retry lifecycle into pure mode.
-// The shape fields carry inert defaults: with one attempt no wait is ever
-// computed, so they never influence behavior.
+// network=1, 30s budget) and would smuggle a retry lifecycle into the
+// policy-less path. The shape fields carry inert defaults: with one attempt
+// no wait is ever computed, so they never influence behavior.
 //
 // Budget is the one field that stays live: it is not a retry-lifecycle cap
-// here but the bound feeding the per-try TTFB timeout (which still applies in
-// pure mode — it bounds a hang, not a retry). It defaults to DefaultBudget
-// and is narrowed by the server's MaxBudget clamp, mirroring Parse.
+// here but the bound feeding the per-try TTFB timeout (which still applies
+// on the policy-less path — it bounds a hang, not a retry). It defaults to
+// DefaultBudget and is narrowed by the server's MaxBudget clamp, mirroring
+// Parse.
 func SingleAttemptPolicy(cfg *ServerConfig) Policy {
 	budget := DefaultBudget
 	if cfg != nil && cfg.MaxBudget > 0 && budget > cfg.MaxBudget {

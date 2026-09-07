@@ -9,8 +9,8 @@
 ```
 reproxy/
 ├── *.go                  # package reproxy — flat, one concern per file
-│   ├── target.go         # PathTarget parsing/normalization (R1)
-│   ├── query.go          # retry-namespace split (R2)
+│   ├── target.go         # PathTarget + scheme-segment policy parsing (R1)
+│   ├── header.go         # shared pair grammar, two policy carriers (R2)
 │   ├── policy.go         # three-tier policy resolution (R3)
 │   ├── body.go           # CapturedBody probe/replay (R4)
 │   ├── backoff.go        # ComputeWait, jitter, Retry-After parsing (R5)

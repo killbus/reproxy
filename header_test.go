@@ -19,7 +19,7 @@ func headerFor(pairs ...string) http.Header {
 }
 
 // TestHeaderPairGrammar: valid pair lists parse to the exact retry.-prefixed
-// url.Values shape SplitQuery would produce for the equivalent query keys.
+// url.Values shape the policy carriers produce.
 func TestHeaderPairGrammar(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -38,6 +38,7 @@ func TestHeaderPairGrammar(t *testing.T) {
 		{"default scope only", "[*].initial=100ms", map[string]string{"retry[*].initial": "100ms"}},
 		{"whitespace around pairs", "  status=429  ;  network=0  ", map[string]string{"retry.status": "429", "retry.network": "0"}},
 		{"whitespace before separator is pair whitespace", "status=429 ; network=0", map[string]string{"retry.status": "429", "retry.network": "0"}},
+		{"whitespace around the equals sign", "status = 429; network = 0", map[string]string{"retry.status": "429", "retry.network": "0"}},
 		{"no whitespace at all", "status=429;network=0;budget=10s", map[string]string{"retry.status": "429", "retry.network": "0", "retry.budget": "10s"}},
 		{"value with comma is fine", "status=429,500-599", map[string]string{"retry.status": "429,500-599"}},
 		{"jitter and retry_after scope fields", "[*].jitter=equal; [429].retry_after=ignore", map[string]string{
@@ -65,8 +66,7 @@ func TestHeaderPairGrammar(t *testing.T) {
 }
 
 // TestHeaderScopeKeysNeverDoubleDot: scope keys map to "retry[*].x", never
-// "retry.[*].x" — the prefixing rule must match query.go's key spelling
-// (queryKeyForHeaderKey).
+// "retry.[*].x" — the header carrier's prefixing rule (queryKeyForHeaderKey).
 func TestHeaderScopeKeysNeverDoubleDot(t *testing.T) {
 	got, err := ParseRetryPolicyHeader(headerFor(RetryPolicyHeader, "[*].attempts=2; [429].max=4s"))
 	if err != nil {
@@ -296,35 +296,35 @@ func TestHeaderLegitimateValuesRepresentable(t *testing.T) {
 	}
 }
 
-// TestHeaderTransformEquivalence: the same policy via query (SplitQuery) and
-// via header (ParseRetryPolicyHeader) resolves to deep-equal Policies — the
-// transform is a pure channel swap.
+// TestHeaderTransformEquivalence: the same policy via the scheme segment
+// (ParsePath) and via the header (ParseRetryPolicyHeader) resolves to
+// deep-equal Policies — one grammar, two carriers, a pure channel swap.
 func TestHeaderTransformEquivalence(t *testing.T) {
-	query := "retry.status=429,5xx&retry.network=1&retry.budget=30s&retry[*].attempts=3&retry[*].backoff=linear&retry[429].attempts=5"
+	segmentPath := "/https+status=429,5xx;network=1;budget=30s;*.attempts=3;*.backoff=linear;429.attempts=5/h"
 	headerVal := "status=429,5xx; network=1; budget=30s; [*].attempts=3; [*].backoff=linear; [429].attempts=5"
 
-	_, viaQuery, err := SplitQuery(query)
-	if err != nil {
-		t.Fatalf("SplitQuery error: %v", err)
-	}
-	viaHeader, rerr := ParseRetryPolicyHeader(headerFor(RetryPolicyHeader, headerVal))
+	_, viaSegment, rerr := ParsePath(segmentPath)
 	if rerr != nil {
-		t.Fatalf("ParseRetryPolicyHeader error: %v", rerr)
+		t.Fatalf("ParsePath error: %v", rerr)
+	}
+	viaHeader, herr := ParseRetryPolicyHeader(headerFor(RetryPolicyHeader, headerVal))
+	if herr != nil {
+		t.Fatalf("ParseRetryPolicyHeader error: %v", herr)
 	}
 
 	cfg := NewDefaultConfig()
-	pq, err1 := Parse(viaQuery, cfg)
+	pseg, err1 := Parse(viaSegment, cfg)
 	ph, err2 := Parse(viaHeader, cfg)
 	if err1 != nil || err2 != nil {
-		t.Fatalf("Parse errors: query=%v header=%v", err1, err2)
+		t.Fatalf("Parse errors: segment=%v header=%v", err1, err2)
 	}
-	if !reflect.DeepEqual(pq, ph) {
-		t.Errorf("query-channel Policy %+v != header-channel Policy %+v", pq, ph)
+	if !reflect.DeepEqual(pseg, ph) {
+		t.Errorf("segment-channel Policy %+v != header-channel Policy %+v", pseg, ph)
 	}
 
 	// Also identical as url.Values maps (same key spellings, same values).
-	if !reflect.DeepEqual(viaQuery, viaHeader) {
-		t.Errorf("url.Values differ: query=%v header=%v", viaQuery, viaHeader)
+	if !reflect.DeepEqual(viaSegment, viaHeader) {
+		t.Errorf("url.Values differ: segment=%v header=%v", viaSegment, viaHeader)
 	}
 }
 

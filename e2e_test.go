@@ -101,7 +101,7 @@ func newE2EEnv(t *testing.T, upstreamHandler http.HandlerFunc, cfg *ServerConfig
 }
 
 // get performs a client GET against the proxy with the given target path
-// (e.g. "/http+retry/up.example.com/x?retry.status=500").
+// (e.g. "/http+status=500/up.example.com/x").
 func (e *e2eEnv) get(t *testing.T, target string) *http.Response {
 	t.Helper()
 	resp, err := e.client.Get(e.proxy.URL + target)
@@ -153,8 +153,8 @@ func (e *e2eEnv) counted(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// TestE2EHappyPathGET: /http+retry/<host>/path?x=1 relays the upstream response
-// with X-Retry-Count: 1 and the original query intact.
+// TestE2EHappyPathGET: /http+POLICY/<host>/path?x=1 relays the upstream
+// response with X-Retry-Count: 1 and the original query intact.
 func TestE2EHappyPathGET(t *testing.T) {
 	env := newE2EEnv(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.RawQuery != "x=1" {
@@ -165,7 +165,7 @@ func TestE2EHappyPathGET(t *testing.T) {
 	}, nil)
 	_ = env
 
-	resp := env.get(t, "/http+retry/up.example.com/path?x=1")
+	resp := env.get(t, "/http+status=500/up.example.com/path?x=1")
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -191,7 +191,7 @@ func TestE2ERetryToSuccess(t *testing.T) {
 		_, _ = w.Write([]byte("third time"))
 	}, nil)
 
-	resp := env.get(t, "/http+retry/up.example.com/x?retry.status=500&retry[*].attempts=3&retry[*].initial=1ms&retry[*].max=2ms&retry[*].jitter=none")
+	resp := env.get(t, "/http+status=500;*.attempts=3;*.initial=1ms;*.max=2ms;*.jitter=none/up.example.com/x")
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -220,7 +220,7 @@ func TestE2EExhaustionDeliversLastResponse(t *testing.T) {
 		_, _ = w.Write([]byte(fmt.Sprintf("attempt-%d", k)))
 	}, nil)
 
-	resp := env.get(t, "/http+retry/up.example.com/x?retry.status=500&retry[*].attempts=2&retry[*].initial=1ms&retry[*].max=2ms&retry[*].jitter=none")
+	resp := env.get(t, "/http+status=500;*.attempts=2;*.initial=1ms;*.max=2ms;*.jitter=none/up.example.com/x")
 	if resp.StatusCode != 500 {
 		t.Fatalf("status = %d, want 500 (real upstream verdict)", resp.StatusCode)
 	}
@@ -260,7 +260,7 @@ func TestE2EPOSTBodyReplay(t *testing.T) {
 		_, _ = w.Write([]byte("echo:" + string(b)))
 	}, nil)
 
-	resp := env.doReq(t, "POST", "/http+retry/up.example.com/echo?retry.status=500&retry[*].attempts=2&retry[*].initial=1ms&retry[*].max=2ms&retry[*].jitter=none",
+	resp := env.doReq(t, "POST", "/http+status=500;*.attempts=2;*.initial=1ms;*.max=2ms;*.jitter=none/up.example.com/echo",
 		strings.NewReader("hello world"), nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -302,7 +302,7 @@ func TestE2EPOSTOversizedDegraded(t *testing.T) {
 	}, cfg)
 
 	body := "0123456789abcdefghij" // 20 bytes > 16-byte cap
-	resp := env.doReq(t, "POST", "/http+retry/up.example.com/upload?retry.status=500&retry[*].attempts=3",
+	resp := env.doReq(t, "POST", "/http+status=500;*.attempts=3/up.example.com/upload",
 		strings.NewReader(body), nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200 (degraded single pass-through)", resp.StatusCode)
@@ -335,7 +335,7 @@ func TestE2EQueryBytePreservation(t *testing.T) {
 		w.WriteHeader(200)
 	}, nil)
 
-	resp := env.get(t, "/http+retry/up.example.com/p?"+raw+"&retry.status=500&retry[*].attempts=2")
+	resp := env.get(t, "/http+status=500;*.attempts=2/up.example.com/p?"+raw)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -498,7 +498,7 @@ func TestE2EAllowlistGateBeforeDNS(t *testing.T) {
 	}
 }
 
-// TestE2EUnknownRetryKey400: an unknown retry.* key is a 400 naming the key
+// TestE2EUnknownRetryKey400: an unknown policy key is a 400 naming the key
 // in the JSON error body.
 func TestE2EUnknownRetryKey400(t *testing.T) {
 	env := newE2EEnv(t, func(w http.ResponseWriter, r *http.Request) {
@@ -506,7 +506,7 @@ func TestE2EUnknownRetryKey400(t *testing.T) {
 		w.WriteHeader(200)
 	}, nil)
 
-	resp := env.get(t, "/http+retry/up.example.com/x?retry.wat=1")
+	resp := env.get(t, "/http+wat=1/up.example.com/x")
 	if resp.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
@@ -517,12 +517,12 @@ func TestE2EUnknownRetryKey400(t *testing.T) {
 	if err := json.Unmarshal([]byte(mustBody(t, resp)), &e); err != nil {
 		t.Fatalf("error body is not JSON: %v", err)
 	}
-	if !strings.Contains(e.Error, "retry.wat") {
+	if !strings.Contains(e.Error, "wat") {
 		t.Errorf("error = %q, want it to name the key", e.Error)
 	}
 }
 
-// TestE2EDeadConfig400: retry[429].attempts without 429 in retry.status is
+// TestE2EDeadConfig400: 429.attempts without 429 in the status gate is
 // a dead configuration -> 400 (fail closed).
 func TestE2EDeadConfig400(t *testing.T) {
 	env := newE2EEnv(t, func(w http.ResponseWriter, r *http.Request) {
@@ -530,7 +530,7 @@ func TestE2EDeadConfig400(t *testing.T) {
 		w.WriteHeader(200)
 	}, nil)
 
-	resp := env.get(t, "/http+retry/up.example.com/x?retry.status=500&retry[429].attempts=4")
+	resp := env.get(t, "/http+status=500;429.attempts=4/up.example.com/x")
 	if resp.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
@@ -559,7 +559,7 @@ func TestE2EBudgetExhaustion(t *testing.T) {
 	}, nil)
 
 	start := time.Now()
-	resp := env.get(t, "/http+retry/up.example.com/x?retry.status=500&retry.budget=100ms&retry[*].attempts=10&retry[*].initial=5s&retry[*].max=10s&retry[*].jitter=none")
+	resp := env.get(t, "/http+status=500;budget=100ms;*.attempts=10;*.initial=5s;*.max=10s;*.jitter=none/up.example.com/x")
 	elapsed := time.Since(start)
 	defer bodyString(t, resp)
 
@@ -598,12 +598,12 @@ func TestE2EHostHeaderIsUpstreams(t *testing.T) {
 	}
 }
 
-// ---- Batch 3: query-ownership modes end to end ----
+// ---- Batch 3: policy carriers end to end ----
 
-// TestE2EPureModeRetryDotParamsReachUpstream: the headline collision case —
+// TestE2EPlainRetryDotParamsReachUpstream: the headline collision case —
 // an upstream whose own API uses retry.-prefixed parameters receives them
-// verbatim through +pure (R2 acceptance criterion).
-func TestE2EPureModeRetryDotParamsReachUpstream(t *testing.T) {
+// verbatim on the policy-less plain form.
+func TestE2EPlainRetryDotParamsReachUpstream(t *testing.T) {
 	var n int32
 	var gotQuery string
 	env := newE2EEnv(t, func(w http.ResponseWriter, r *http.Request) {
@@ -614,29 +614,29 @@ func TestE2EPureModeRetryDotParamsReachUpstream(t *testing.T) {
 	}, nil)
 
 	raw := "retry.count=7&retry.token=abc123&retry.status=5xx&a=%2Fb&c&d=&e=1&e=2"
-	resp := env.get(t, "/http+pure/up.example.com/v1/things?"+raw)
+	resp := env.get(t, "/http/up.example.com/v1/things?"+raw)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	bodyString(t, resp)
 	if gotQuery != raw {
-		t.Errorf("upstream query = %q, want %q (retry.* params are target data in pure mode)", gotQuery, raw)
+		t.Errorf("upstream query = %q, want %q (retry.* params are target data)", gotQuery, raw)
 	}
 	if n := atomic.LoadInt32(&n); n != 1 {
 		t.Errorf("upstream calls = %d, want 1 (no retry lifecycle)", n)
 	}
 	if got := resp.Header.Get("X-Retry-Count"); got != "" {
-		t.Errorf("X-Retry-Count = %q, want absent in headerless pure mode", got)
+		t.Errorf("X-Retry-Count = %q, want absent without a policy", got)
 	}
 }
 
-// TestE2EPureModeRetryURLStillWorks: +retry (the URL channel) keeps working
-// next to +pure — the same host, the same shape, retries on (R3).
-func TestE2EPureModeRetryURLStillWorks(t *testing.T) {
+// TestE2ESegmentPolicyPassthroughQueryUntouched: a segment policy with
+// passthrough query params — the target data stays in the query, retries on.
+func TestE2ESegmentPolicyPassthroughQueryUntouched(t *testing.T) {
 	var n int32
 	env := newE2EEnv(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.RawQuery != "target_param=yes" {
-			t.Errorf("upstream query = %q, want target_param=yes (retry keys stripped)", r.URL.RawQuery)
+			t.Errorf("upstream query = %q, want target_param=yes (passthrough query untouched)", r.URL.RawQuery)
 		}
 		if atomic.AddInt32(&n, 1) <= 1 {
 			w.WriteHeader(500)
@@ -647,7 +647,7 @@ func TestE2EPureModeRetryURLStillWorks(t *testing.T) {
 		_, _ = w.Write([]byte("second works"))
 	}, nil)
 
-	resp := env.get(t, "/http+retry/up.example.com/x?target_param=yes&retry.status=500&retry[*].attempts=2&retry[*].initial=1ms&retry[*].max=2ms&retry[*].jitter=none")
+	resp := env.get(t, "/http+status=500;*.attempts=2;*.initial=1ms;*.max=2ms;*.jitter=none/up.example.com/x?target_param=yes")
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -662,10 +662,10 @@ func TestE2EPureModeRetryURLStillWorks(t *testing.T) {
 	}
 }
 
-// TestE2EPureModeHeaderPolicy: +pure + X-Reproxy-Retry-Policy over real TCP —
-// policy from the header, query untouched (retry.* is target data), retries
-// observable, X-Retry-* headers emitted (R4 acceptance criterion).
-func TestE2EPureModeHeaderPolicy(t *testing.T) {
+// TestE2EPlainHeaderPolicy: plain form + X-Reproxy-Retry-Policy over real
+// TCP — policy from the header, query untouched (retry.* is target data),
+// retries observable, X-Retry-* headers emitted.
+func TestE2EPlainHeaderPolicy(t *testing.T) {
 	raw := "retry.count=3&data=%2Fpath"
 	var n int32
 	var gotQuery string
@@ -682,13 +682,13 @@ func TestE2EPureModeHeaderPolicy(t *testing.T) {
 
 	hdr := http.Header{}
 	hdr.Set(RetryPolicyHeader, "status=5xx; [*].initial=1ms; [*].max=2ms; [*].jitter=none")
-	resp := env.doReq(t, "GET", "/http+pure/up.example.com/x?"+raw, nil, hdr)
+	resp := env.doReq(t, "GET", "/http/up.example.com/x?"+raw, nil, hdr)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200 (header policy retried the 500)", resp.StatusCode)
 	}
 	bodyString(t, resp)
 	if gotQuery != raw {
-		t.Errorf("upstream query = %q, want %q (never split in pure mode)", gotQuery, raw)
+		t.Errorf("upstream query = %q, want %q (never split)", gotQuery, raw)
 	}
 	if n := atomic.LoadInt32(&n); n != 2 {
 		t.Errorf("upstream calls = %d, want 2", n)
@@ -699,9 +699,9 @@ func TestE2EPureModeHeaderPolicy(t *testing.T) {
 }
 
 // TestE2EHeadersStrippedUpstream: the upstream never sees ANY X-Reproxy-*
-// header — neither the policy header on the paths where it is consumed
-// (pure+header) nor the namespace on the query-channel path (retry mode).
-// Batch 2's unit tests cover buildOutboundHeaders; this pins the full path.
+// header — neither the policy header where it is consumed (plain + header)
+// nor on the segment-policy path. Batch 2's unit tests cover
+// buildOutboundHeaders; this pins the full path.
 func TestE2EHeadersStrippedUpstream(t *testing.T) {
 	var sawPolicy, sawOther bool
 	env := newE2EEnv(t, func(w http.ResponseWriter, r *http.Request) {
@@ -717,18 +717,27 @@ func TestE2EHeadersStrippedUpstream(t *testing.T) {
 		w.WriteHeader(200)
 	}, nil)
 
-	// +pure + header: the policy header is consumed by the proxy. (Unknown
+	// Plain + header: the policy header is consumed by the proxy. (Unknown
 	// X-Reproxy-* members never get this far — the namespace guard 400s them
 	// — so the strip is exercised with the one legal member.)
 	hdr := http.Header{}
 	hdr.Set(RetryPolicyHeader, "status=5xx")
-	resp := env.doReq(t, "GET", "/http+pure/up.example.com/x?retry.count=1", nil, hdr)
+	resp := env.doReq(t, "GET", "/http/up.example.com/x?retry.count=1", nil, hdr)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 	bodyString(t, resp)
 
-	// Plain form (pure mode): a lookalike outside the reserved namespace is
+	// Segment policy: the header channel is unused; the strip is exercised
+	// by ordinary traffic.
+	hdr3 := http.Header{}
+	resp3 := env.doReq(t, "GET", "/http+status=5xx/up.example.com/x", nil, hdr3)
+	if resp3.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp3.StatusCode)
+	}
+	bodyString(t, resp3)
+
+	// Plain form: a lookalike outside the reserved namespace is
 	// client data and must pass through, exercising the strip with ordinary
 	// traffic.
 	hdr2 := http.Header{}
@@ -747,10 +756,11 @@ func TestE2EHeadersStrippedUpstream(t *testing.T) {
 	}
 }
 
-// TestE2EPureModeLargeBodyNoCap: a request body far over the configured cap
-// streams through +pure with no capture — no 413 even in strict mode, no
-// X-Retry-Dropped, delivered byte-identically over real TCP (D14).
-func TestE2EPureModeLargeBodyNoCap(t *testing.T) {
+// TestE2EPlainLargeBodyNoCap: a request body far over the configured cap
+// streams through the policy-less plain form with no capture — no 413 even
+// in strict mode, no X-Retry-Dropped, delivered byte-identically over real
+// TCP.
+func TestE2EPlainLargeBodyNoCap(t *testing.T) {
 	var bodies []string
 	var mu sync.Mutex
 	cfg := &ServerConfig{
@@ -775,9 +785,9 @@ func TestE2EPureModeLargeBodyNoCap(t *testing.T) {
 	}, cfg)
 
 	body := strings.Repeat("0123456789", 50) // 500 bytes >> 16-byte cap
-	resp := env.doReq(t, "POST", "/http+pure/up.example.com/upload", strings.NewReader(body), nil)
+	resp := env.doReq(t, "POST", "/http/up.example.com/upload", strings.NewReader(body), nil)
 	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d, want 200 (no cap machinery in pure mode, even strict)", resp.StatusCode)
+		t.Fatalf("status = %d, want 200 (no cap machinery without a policy, even strict)", resp.StatusCode)
 	}
 	if got := resp.Header.Get("X-Retry-Dropped"); got != "" {
 		t.Errorf("X-Retry-Dropped = %q, want absent", got)
@@ -790,10 +800,10 @@ func TestE2EPureModeLargeBodyNoCap(t *testing.T) {
 	}
 }
 
-// TestE2EPureModeHeaderPolicyBodyReplayE2E: +pure + header policy + body over
-// real TCP — the header revives capture (D14) so the POST replays across
-// attempts and the upstream receives the identical body every time.
-func TestE2EPureModeHeaderPolicyBodyReplayE2E(t *testing.T) {
+// TestE2EPlainHeaderPolicyBodyReplayE2E: plain form + header policy + body
+// over real TCP — the header policy revives capture so the POST replays
+// across attempts and the upstream receives the identical body every time.
+func TestE2EPlainHeaderPolicyBodyReplayE2E(t *testing.T) {
 	var received []string
 	var mu sync.Mutex
 	env := newE2EEnv(t, func(w http.ResponseWriter, r *http.Request) {
@@ -817,7 +827,7 @@ func TestE2EPureModeHeaderPolicyBodyReplayE2E(t *testing.T) {
 
 	hdr := http.Header{}
 	hdr.Set(RetryPolicyHeader, "status=5xx; [*].initial=1ms; [*].max=2ms; [*].jitter=none")
-	resp := env.doReq(t, "POST", "/http+pure/up.example.com/echo?retry.count=1", strings.NewReader("the same payload"), hdr)
+	resp := env.doReq(t, "POST", "/http/up.example.com/echo?retry.count=1", strings.NewReader("the same payload"), hdr)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200 (header policy + captured body replayed)", resp.StatusCode)
 	}
@@ -836,11 +846,10 @@ func TestE2EPureModeHeaderPolicyBodyReplayE2E(t *testing.T) {
 	}
 }
 
-// TestE2EModeChannelConflictOverTCP: the conflict 400 (query channel active
-// + policy header present) over a real listener, on the +retry form (the
-// only mode where query-splitting is active; the plain form is pure mode,
-// where the header channel is the intended combination).
-func TestE2EModeChannelConflictOverTCP(t *testing.T) {
+// TestE2EPolicyChannelConflictOverTCP: the conflict 400 (segment policy +
+// policy header) over a real listener. The plain form + header is the
+// intended header-channel combination, not a conflict.
+func TestE2EPolicyChannelConflictOverTCP(t *testing.T) {
 	env := newE2EEnv(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("upstream must not be reached for a channel conflict")
 		w.WriteHeader(200)
@@ -849,14 +858,14 @@ func TestE2EModeChannelConflictOverTCP(t *testing.T) {
 	hdr := http.Header{}
 	hdr.Set(RetryPolicyHeader, "status=5xx")
 	for _, target := range []string{
-		"/http+retry/up.example.com/x?retry.status=500",
+		"/http+status=500/up.example.com/x",
 	} {
 		resp := env.doReq(t, "GET", target, nil, hdr)
 		if resp.StatusCode != 400 {
 			t.Fatalf("%s: status = %d, want 400 (both channels used)", target, resp.StatusCode)
 		}
 		body := mustBody(t, resp)
-		for _, want := range []string{RetryPolicyHeader, "mutually exclusive", "+pure", "middleware or gateway"} {
+		for _, want := range []string{RetryPolicyHeader, "mutually exclusive", "scheme segment", "middleware or gateway"} {
 			if !strings.Contains(body, want) {
 				t.Errorf("%s: 400 body %q should name %q", target, body, want)
 			}
@@ -864,17 +873,17 @@ func TestE2EModeChannelConflictOverTCP(t *testing.T) {
 	}
 }
 
-// TestE2EPureModeSSRFStillEnforced: SSRF protection is mode-independent —
-// a private resolution under +pure is still a 403.
-func TestE2EPureModeSSRFStillEnforced(t *testing.T) {
+// TestE2EPlainSSRFStillEnforced: SSRF protection is policy-independent —
+// a private resolution on the plain form is still a 403.
+func TestE2EPlainSSRFStillEnforced(t *testing.T) {
 	env := newE2EEnv(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("upstream must not be reached for a forbidden target")
 		w.WriteHeader(200)
 	}, nil)
 
-	resp := env.get(t, "/http+pure/127.0.0.1/x")
+	resp := env.get(t, "/http/127.0.0.1/x")
 	if resp.StatusCode != 403 {
-		t.Fatalf("status = %d, want 403 (SSRF unconditional across modes)", resp.StatusCode)
+		t.Fatalf("status = %d, want 403 (SSRF unconditional)", resp.StatusCode)
 	}
 	bodyString(t, resp)
 }

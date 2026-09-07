@@ -402,8 +402,8 @@ func TestParseMaxInitialRelationship(t *testing.T) {
 
 func TestParseGateInStatusScope(t *testing.T) {
 	// Gates are global: retry[NNN].status / .network / .budget cannot appear.
-	// SplitQuery rejects these keys as unknown (they are not scopeFields);
-	// Parse must also fail closed if handed such params directly.
+	// These keys are unknown at the scope level (they are not scopeFields);
+	// Parse must fail closed if handed such params directly.
 	for _, key := range []string{
 		"retry[429].status",
 		"retry[429].network",

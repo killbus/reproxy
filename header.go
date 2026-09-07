@@ -1,13 +1,22 @@
 package reproxy
 
-// header.go implements the header channel of the retry control plane
-// (design §2): a reserved X-Reproxy-* namespace for reproxy<->client
-// protocol whose single member, X-Reproxy-Retry-Policy, carries a retry
-// policy out-of-band so the request query can stay target-owned.
+// header.go implements the retry control-plane policy grammar and its two
+// carriers (v0.3): the request header X-Reproxy-Retry-Policy and the scheme
+// segment of the proxy path (/https+POLICY/host). Both carriers speak ONE
+// grammar — semicolon-separated key=value pairs, whitespace-trimmed — fed
+// through a shared pure transform into the url.Values shape policy.Parse
+// consumes, so the two carriers get Parse's whole validation matrix and error
+// bodies with zero new field rules.
 //
-// This file parses and strips only. Pipeline wiring — mode resolution, the
-// query/header mutual exclusion, the single-attempt literal for headerless
-// pure mode — belongs to proxy.go (Batch 3).
+// The only difference between the carriers is the spelling of scope keys:
+// the header writes [*].attempts / [429].attempts (brackets are legal in
+// header values), the path segment writes *.attempts / 429.attempts
+// (brackets are gen-delims, illegal in path segments). The dotted↔bracketed
+// mapping is a total bijection, locked by tests.
+//
+// This file parses and strips only. Pipeline wiring — carrier resolution,
+// the segment×header mutual exclusion, the single-attempt literal for the
+// no-policy path — belongs to proxy.go.
 
 import (
 	"fmt"
@@ -18,36 +27,55 @@ import (
 
 // RetryPolicyHeader is the single recognized member of the reserved
 // X-Reproxy-* request-header namespace. Its value is a semicolon-separated
-// list of key=value pairs using the query channel's key grammar minus the
-// "retry." prefix:
+// list of key=value pairs using the policy pair grammar:
 //
 //	X-Reproxy-Retry-Policy: status=5xx; network=1; budget=30s; [*].attempts=3; [429].attempts=5
 const RetryPolicyHeader = "X-Reproxy-Retry-Policy"
 
 // reproxyHeaderPrefix marks the reserved request-header namespace for
 // reproxy<->client protocol. Unknown members are a 400 on every request in
-// every mode (fail closed, mirroring unknown retry.* query keys), and every
-// member is stripped before the request is forwarded upstream: the upstream
-// never sees the proxy's control plane.
+// every mode (fail closed), and every member is stripped before the request
+// is forwarded upstream: the upstream never sees the proxy's control plane.
 const reproxyHeaderPrefix = "X-Reproxy-"
 
+// carrierName labels a policy carrier in error messages.
+type carrierName string
+
+const (
+	carrierHeader  carrierName = "X-Reproxy-Retry-Policy header"
+	carrierSegment carrierName = "path scheme segment"
+)
+
+// policyCarrier is the per-carrier configuration of the shared pair grammar:
+// how the carrier is named in error bodies and how one of its keys maps to
+// the retry.-prefixed query spelling policy.Parse expects.
+type policyCarrier struct {
+	name carrierName
+	// queryKeyFor maps one grammar key to its retry.-prefixed spelling.
+	// For the header carrier the mapping is total (unknown keys pass
+	// through unvalidated here and die inside Parse, preserving the
+	// header channel's exact error bodies); for the segment carrier the
+	// mapper validates key shape eagerly so bare words are a 400 at the
+	// pair layer (see the bare-word rule below).
+	queryKeyFor func(key string) (string, *RequestError)
+}
+
 // ParseRetryPolicyHeader parses X-Reproxy-Retry-Policy into the url.Values
-// shape policy.Parse consumes — the same shape SplitQuery produces for
-// retry-namespace query keys — so the header channel gets Parse's whole
+// shape policy.Parse consumes, so the header channel gets Parse's whole
 // validation matrix and error bodies with zero new rules.
 //
 // Grammar: pairs separated by ";", optional whitespace around pairs, each
-// pair "key=value" with the key spelled exactly as the query channel's
-// post-"retry." remainder: gates (status, network, budget) and scope fields
-// ([*].FIELD, [NNN].FIELD). Keys are case-sensitive; values are taken
-// literally (never URL-decoded — header values are plain text, unlike query
-// components). No legitimate value needs ";" or "=", so the pair split stays
-// unambiguous (asserted by TestHeaderLegitimateValuesRepresentable).
+// pair "key=value" with the key spelled exactly as a policy gate (status,
+// network, budget) or a bracketed scope field ([*].FIELD, [NNN].FIELD).
+// Keys are case-sensitive; values are taken literally (never URL-decoded —
+// header values are plain text). No legitimate value needs ";" or "=", so
+// the pair split stays unambiguous (asserted by
+// TestHeaderLegitimateValuesRepresentable).
 //
 // Absent header: returns (nil, nil) — the ONLY "no policy" spelling. A
 // present-but-empty, whitespace-only, or empty-pair (";;") value is a 400
 // (the normalization ladder): degenerate input must never read as "default
-// policy", because Parse(url.Values{}) silently returns the v0.1.0 defaults
+// policy", because Parse(url.Values{}) silently returns defaults
 // (3 attempts, network=1, 30s budget).
 //
 // Also fail-closed on shape errors: multiple header occurrences, a pair
@@ -73,7 +101,7 @@ func ParseRetryPolicyHeader(h http.Header) (url.Values, *RequestError) {
 	case 0:
 		return nil, nil // absent: the only no-policy spelling
 	case 1:
-		return parseRetryPolicyHeaderValue(values[0])
+		return parsePolicyPairList(values[0], headerCarrier)
 	default:
 		return nil, &RequestError{
 			Code:   400,
@@ -83,11 +111,29 @@ func ParseRetryPolicyHeader(h http.Header) (url.Values, *RequestError) {
 	}
 }
 
-// parseRetryPolicyHeaderValue parses one X-Reproxy-Retry-Policy value into
-// retry.-prefixed url.Values. Pair-level shape errors (empty pair, missing
-// "=", empty key, stray "=") are 400s here; every field/value validation is
-// deferred to policy.Parse (identical 400 matrix and error bodies).
-func parseRetryPolicyHeaderValue(value string) (url.Values, *RequestError) {
+// The two carriers of the shared pair grammar. One grammar, two spellings of
+// scope keys; everything else (separators, trimming, the fail-closed ladder,
+// value handling) is identical by construction — both call
+// parsePolicyPairList.
+var headerCarrier = policyCarrier{
+	name:        carrierHeader,
+	queryKeyFor: queryKeyForHeaderKey,
+}
+
+var segmentCarrier = policyCarrier{
+	name:        carrierSegment,
+	queryKeyFor: queryKeyForSegmentKey,
+}
+
+// parsePolicyPairList parses one policy value into retry.-prefixed
+// url.Values. This is the shared grammar both carriers speak: pairs split on
+// ";", whitespace-trimmed, each pair "key=value", values never containing
+// ";" or "=" (no legitimate policy value needs either, so the split is
+// unambiguous by construction). Pair-level shape errors (empty pair, missing
+// "=", empty key, stray "=") and — for carriers whose key mapper validates —
+// unknown keys are 400s here; every field/value validation is deferred to
+// policy.Parse (identical 400 matrix and error bodies for both carriers).
+func parsePolicyPairList(value string, c policyCarrier) (url.Values, *RequestError) {
 	bad := func(reason, hint string) *RequestError {
 		return &RequestError{Code: 400, Reason: reason, Hint: hint}
 	}
@@ -95,8 +141,8 @@ func parseRetryPolicyHeaderValue(value string) (url.Values, *RequestError) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
 		return nil, bad(
-			fmt.Sprintf("%s header is present but empty: an absent header is the only \"no policy\" spelling", RetryPolicyHeader),
-			"send pairs like \"status=5xx; [*].attempts=3\", or omit the header entirely",
+			fmt.Sprintf("policy in the %s is present but empty: an absent policy is the only \"no policy\" spelling", c.name),
+			"send pairs like \"status=5xx; *.attempts=3\" (segment) or \"status=5xx; [*].attempts=3\" (header), or omit the policy entirely",
 		)
 	}
 
@@ -105,54 +151,111 @@ func parseRetryPolicyHeaderValue(value string) (url.Values, *RequestError) {
 		pair = strings.TrimSpace(pair)
 		if pair == "" {
 			return nil, bad(
-				fmt.Sprintf("malformed %s header: empty pair in value %q", RetryPolicyHeader, value),
+				fmt.Sprintf("malformed policy in the %s: empty pair in value %q", c.name, value),
 				"separate pairs with a single \";\" and no empty segments, e.g. \"status=5xx; network=1\"",
 			)
 		}
 		key, val, found := strings.Cut(pair, "=")
 		if !found {
+			// The key is validated FIRST (the bare-word rule): any bare
+			// word that is not a policy key is an unknown policy field,
+			// the generic 400; only a key that IS a policy key missing
+			// its "=" reaches this not-key=value branch.
+			if _, kerr := c.queryKeyFor(strings.TrimSpace(pair)); kerr != nil {
+				return nil, kerr
+			}
 			return nil, bad(
-				fmt.Sprintf("malformed %s header: pair %q is not key=value", RetryPolicyHeader, pair),
-				"write each pair as key=value, e.g. \"status=5xx; [*].attempts=3\"",
+				fmt.Sprintf("malformed policy in the %s: pair %q is not key=value", c.name, pair),
+				"write each pair as key=value, e.g. \"status=5xx; *.attempts=3\"",
 			)
 		}
+		key = strings.TrimSpace(key)
 		if key == "" {
 			return nil, bad(
-				fmt.Sprintf("malformed %s header: pair %q has an empty key", RetryPolicyHeader, pair),
-				"keys are status, network, budget, [*].FIELD, or [NNN].FIELD",
+				fmt.Sprintf("malformed policy in the %s: pair %q has an empty key", c.name, pair),
+				"keys are status, network, budget, *.FIELD (segment) or [*].FIELD (header), or NNN.FIELD / [NNN].FIELD",
 			)
+		}
+		// Key shape: total for the header carrier (unknown keys die inside
+		// Parse with Parse's exact error body), validated here for the
+		// segment carrier (a bare word is an unknown policy field 400).
+		queryKey, kerr := c.queryKeyFor(key)
+		if kerr != nil {
+			return nil, kerr
 		}
 		if strings.Contains(val, "=") {
 			return nil, bad(
-				fmt.Sprintf("malformed %s header: value of pair %q contains \"=\": no retry value needs it", RetryPolicyHeader, pair),
+				fmt.Sprintf("malformed policy in the %s: value of pair %q contains \"=\": no retry value needs it", c.name, pair),
 				"check the pair for a stray character; values never contain \"=\" or \";\"",
 			)
 		}
-		// Pure transform, zero new key validation (design §2): the key is
-		// prefixed to its query spelling and policy.Parse applies the whole
-		// query-channel validation matrix — identical 400s for free.
-		params.Add(queryKeyForHeaderKey(key), val)
+		// Pure transform, zero new key validation: the key is mapped to its
+		// retry.-prefixed spelling and policy.Parse applies the whole
+		// validation matrix — identical 400s for free.
+		params.Add(queryKey, strings.TrimSpace(val))
 	}
 	return params, nil
 }
 
-// queryKeyForHeaderKey maps a header-channel key to the query-channel key
-// Parse expects. Gates gain the "retry." prefix; scope keys (which begin
-// with "[") gain only "retry": the query channel's spelling is
-// "retry[*].attempts", never "retry.[*].attempts".
-func queryKeyForHeaderKey(key string) string {
+// queryKeyForHeaderKey maps a header-carrier key to the retry.-prefixed
+// spelling Parse expects. Gates gain the "retry." prefix; scope keys (which
+// begin with "[") gain only "retry": the spelling is "retry[*].attempts",
+// never "retry.[*].attempts". The mapping is total — unknown keys pass
+// through so Parse reports them with its own error body (preserving the
+// header channel's exact 400s).
+func queryKeyForHeaderKey(key string) (string, *RequestError) {
 	if strings.HasPrefix(key, "[") {
-		return "retry" + key
+		return "retry" + key, nil
 	}
-	return "retry." + key
+	return "retry." + key, nil
+}
+
+// queryKeyForSegmentKey maps a scheme-segment policy key to the
+// retry.-prefixed spelling Parse expects. The segment cannot carry brackets
+// (gen-delims, illegal in path segments), so scopes are dotted:
+//
+//	*.FIELD   -> retry[*].FIELD
+//	NNN.FIELD -> retry[NNN].FIELD  (NNN a 3-digit status code)
+//	status    -> retry.status      (gates map as-is)
+//
+// Unlike the header mapper this one validates key shape EAGERLY: the pair
+// grammar has no place to defer to Parse for key spelling (the segment is
+// parsed before any url.Values exist), and the bare-word rule requires bare
+// words — "retry", "pure", "foo" — to die as the generic unknown-field 400.
+// A malformed dotted scope that is not digits is reported as an unknown
+// policy field too (the field set is closed; there is no other legal
+// interpretation of a dotted key).
+func queryKeyForSegmentKey(key string) (string, *RequestError) {
+	if gateKeys[key] {
+		return "retry." + key, nil
+	}
+	// Scope spelling: SCOPE.FIELD with SCOPE "*" or a 3-digit code.
+	scope, field, found := strings.Cut(key, ".")
+	if !found || field == "" || scope == "" {
+		return "", &RequestError{
+			Code:   400,
+			Reason: fmt.Sprintf("unknown policy field %q", key),
+			Hint:   "policy keys are status, network, budget, *.FIELD, or NNN.FIELD (a 3-digit status code), e.g. \"status=5xx; *.attempts=3; 429.attempts=5\"",
+		}
+	}
+	if scope == "*" {
+		return "retry[*]." + field, nil
+	}
+	if len(scope) != 3 || !isDigits(scope) {
+		return "", &RequestError{
+			Code:   400,
+			Reason: fmt.Sprintf("unknown policy field %q", key),
+			Hint:   "policy keys are status, network, budget, *.FIELD, or NNN.FIELD (a 3-digit status code), e.g. \"status=5xx; *.attempts=3; 429.attempts=5\"",
+		}
+	}
+	return "retry[" + scope + "]." + field, nil
 }
 
 // validateReproxyNamespace enforces the reserved X-Reproxy-* request-header
-// namespace (design §2): any member other than RetryPolicyHeader is a 400 on
-// every request in every mode — fail closed, mirroring unknown retry.*
-// query keys. ParseRetryPolicyHeader runs it; modes that do not parse the
-// policy header (the query channel) must run it separately so the namespace
-// stays reserved everywhere.
+// namespace: any member other than RetryPolicyHeader is a 400 on every
+// request in every mode — fail closed. ParseRetryPolicyHeader runs it;
+// callers that take their policy from the scheme segment must run it
+// separately so the namespace stays reserved everywhere.
 func validateReproxyNamespace(h http.Header) *RequestError {
 	for name := range h {
 		canonical := http.CanonicalHeaderKey(name)

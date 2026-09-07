@@ -24,7 +24,7 @@ Every line starts with `event=<kind>` followed by space-separated `key=value` pa
 
 | Event | When | Keys |
 |---|---|---|
-| `request` | one per request (summary) | method, target, status, attempts, duration, **mode** |
+| `request` | one per request (summary) | method, target, status, attempts, duration, **policy** |
 | `retry` | each retry decision | target, attempt, status, reason, remaining_budget, attempts=cur/limit |
 | `wait` | before each backoff sleep | target, backoff |
 | `warn` | degraded body (cap exceeded) | message |
@@ -34,6 +34,6 @@ Rules:
 
 - Durations are rounded to milliseconds (`d.Round(time.Millisecond)`) — sub-ms noise adds nothing.
 - `reason` is quoted (`%q`) — it's free text, the rest are machine-parsed tokens.
-- `mode` on `request` is `retry` or `pure` (the resolved mode — the plain scheme logs `pure`).
+- `policy` on `request` is `segment`, `header`, or `none` — the carrier the retry policy arrived on (`none` = policy-less single-attempt pass-through; the mode concept was deleted in v0.3.0).
 - **Errors returned to clients are also logged server-side exactly once** — the JSON error body names the reason; the log line is the server-side record of the same event. No double logging.
 - Never log request bodies, target paths beyond host:port, or client query strings (they may carry credentials in signed URLs).

@@ -14,12 +14,12 @@ This directory contains guidelines for backend development. Fill in each file wi
 
 | Guide | Description | Status |
 |-------|-------------|--------|
-| [Retry Proxy Contract](./retry-proxy-contract.md) | Query namespace, policy resolution, budget, response headers — executable protocol contract | Filled (09-04; amended 09-06 plain→pure) |
+| [Retry Proxy Contract](./retry-proxy-contract.md) | Policy carriers (segment/header), request grammar, resolution, budget, response headers — executable protocol contract | Filled (09-04; rewritten 09-07 v0.3.0 zero-mode grammar) |
 | [Directory Structure](./directory-structure.md) | Flat single-package layout, one concern per file, stdlib-only rule | Filled (09-04) |
 | [Database Guidelines](./database-guidelines.md) | N/A — stateless proxy; reactivation rules for future persistence | Filled (N/A) |
 | [Error Handling](./error-handling.md) | Commit point, race cleanup, SSRF, streaming semantics | Filled (09-04) |
 | [Quality Guidelines](./quality-guidelines.md) | Test hardening, mutation scanning, forbidden patterns | Filled (09-04) |
-| [Logging Guidelines](./logging-guidelines.md) | event= key=value line format, event catalog, redaction rules | Filled (09-04; amended 09-06) |
+| [Logging Guidelines](./logging-guidelines.md) | event= key=value line format, event catalog, redaction rules | Filled (09-04; amended 09-07 policy= carrier field) |
 
 ---
 

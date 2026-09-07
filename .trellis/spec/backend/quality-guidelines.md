@@ -39,8 +39,9 @@ q := u.Query(); ...; u.RawQuery = q.Encode()
 ```
 
 ```go
-// Do — string-level split; forward the passthrough part byte-identical
-passthrough, retryParams, err := SplitQuery(rawQuery)
+// Do — forward the raw query string byte-identical, always (v0.3.0: the
+// query is unconditionally upstream-owned; there is no split)
+upstreamQuery := r.URL.RawQuery
 ```
 
 **Why**: `url.Values.Encode()` normalizes encoding and ordering; signed URLs (HMAC over the query) then fail upstream.

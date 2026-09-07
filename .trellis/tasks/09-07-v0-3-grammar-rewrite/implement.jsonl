@@ -1,0 +1,5 @@
+{"file": ".trellis/tasks/09-07-v0-3-grammar-rewrite/prd.md", "reason": "The task contract: new grammar spec, deletions, ACs, no-legacy rule"}
+{"file": ".trellis/spec/backend/retry-proxy-contract.md", "reason": "Current protocol contract — grammar, channels, validation matrix being rewritten by this task"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "mode= on request line must change (mode axis deleted)"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Mutation-scan method and flake policy (TestProxyPerStatusScopeShaping)"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Fail-closed 400 shapes the new grammar must extend, not weaken"}
