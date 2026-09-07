@@ -14,3 +14,11 @@
 *.go text eol=lf
 go.mod text eol=lf
 go.sum text eol=lf
+
+# Dockerfile must check out as LF too: a CRLF heredoc-style RUN would inject
+# \r into the built binary's version string. Compose YAML has no such
+# hazard but gains nothing from CRLF either.
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+.dockerignore text eol=lf

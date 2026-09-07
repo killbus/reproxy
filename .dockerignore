@@ -1,0 +1,26 @@
+# The build context is source only. Everything not needed to compile
+# ./cmd/reproxy is excluded so the image cannot ship a dirty workspace
+# and context uploads stay fast.
+
+# VCS + tooling
+.git
+.gitignore
+.gitattributes
+.github
+.trellis
+.claude
+.codex
+.cursor
+.agents
+.opencode
+
+# Docs travel in the repo, not the image
+docs
+*.md
+
+# Tests never enter the build context
+*_test.go
+
+# Build output + local artifacts
+reproxy
+*.exe

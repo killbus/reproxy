@@ -3,4 +3,7 @@
 
 # Build output
 *.exe
-reproxy
+# Anchored: ignore the ./reproxy binary at the repo root only — an
+# unanchored "reproxy" would also match the cmd/reproxy package dir
+# (go build ./cmd/reproxy drops the binary next to main.go).
+/reproxy

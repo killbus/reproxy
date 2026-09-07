@@ -1,0 +1,20 @@
+# Executable README: the smallest compose file that runs reproxy.
+#
+# Deliberately exactly four keys — image, command, ports, restart:
+#   - no volumes:  reproxy is stateless; a volume would claim state that
+#                  does not exist
+#   - no env vars: flags are the one config channel (a second channel
+#                  would fork the configuration story)
+#   - no healthcheck: distroless has no shell; an unexecutable
+#                  healthcheck is worse than none
+#   - no depends_on / networks: nothing to depend on
+#
+# Local-build variant: replace `image:` with `build: .` (see README).
+
+services:
+  reproxy:
+    image: ghcr.io/killbus/reproxy:v0.3.0   # pinned version; immutable tag
+    command: ["--allowlist", "api.example.com"]
+    ports:
+      - "8080:8080"
+    restart: unless-stopped

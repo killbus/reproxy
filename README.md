@@ -20,8 +20,72 @@ go build ./cmd/reproxy        # produces ./reproxy
 curl "http://localhost:8080/https+status=500,502-504;*.attempts=3/example.com/api"
 ```
 
+A binary built this way reports `--version` as `dev`; release builds are
+stamped with the git tag via `-ldflags`.
+
 The server refuses to start with an empty allowlist unless `--dangerous-allow-all`
 is passed (see [Security](#security)).
+
+## Docker
+
+A prebuilt image is published at `ghcr.io/killbus/reproxy` (distroless-based,
+non-root, single static binary). One-liner:
+
+```sh
+docker run --rm -p 8080:8080 ghcr.io/killbus/reproxy:latest \
+  --allowlist example.com
+```
+
+Or as a compose file (`docker compose up -d`):
+
+```yaml
+services:
+  reproxy:
+    image: ghcr.io/killbus/reproxy:v0.3.0   # pinned version
+    command: ["--allowlist", "api.example.com"]
+    ports: ["8080:8080"]
+    restart: unless-stopped
+```
+
+The image is `gcr.io/distroless/static-debian13:nonroot` (not `scratch`)
+because reproxy makes outbound HTTPS connections with certificate
+validation — a bare scratch image has no CA roots and the first `https`
+upstream would fail.
+
+### Tag semantics
+
+- **Version tags** (`v0.1.0`, `v0.3.0`, …) are **immutable**: each is pushed
+  once at release time and never re-pushed. What a version tag pointed to
+  yesterday is what it points to forever. Pin production deployments to a
+  version tag.
+- **`latest`** is the newest release only — it is a convenience for
+  trying the tool, not a deployment target.
+- The binary reports its version via `--version` (the tag it was built
+  from; `dev` for local builds):
+
+```sh
+docker run --rm ghcr.io/killbus/reproxy:v0.3.0 --version
+```
+
+### Building locally
+
+```sh
+docker build -t reproxy:local .
+docker run --rm -p 8080:8080 reproxy:local --allowlist example.com
+```
+
+The local image reports `--version` as `dev`; inject a version with
+`--build-arg VERSION=vX.Y.Z`. The compose local-build variant replaces
+`image:` with `build: .`:
+
+```yaml
+services:
+  reproxy:
+    build: .
+    command: ["--allowlist", "api.example.com"]
+    ports: ["8080:8080"]
+    restart: unless-stopped
+```
 
 ## How it works
 

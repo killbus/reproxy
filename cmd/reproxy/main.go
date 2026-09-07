@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -18,6 +19,10 @@ import (
 
 	"reproxy"
 )
+
+// version is stamped at build time via -ldflags "-X main.version=<tag>"
+// (Dockerfile build arg VERSION, CI release builds). "dev" when unstamped.
+var version = "dev"
 
 // readHeaderTimeout bounds how long the server waits for request headers
 // (a slowloris guard; a general-purpose hardening default).
@@ -30,6 +35,13 @@ const shutdownDrain = 10 * time.Second
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
 	log.SetPrefix("reproxy: ")
+
+	if versionRequested(os.Args[1:]) {
+		// The banner goes to stdout (a machine-readable value, asserted by
+		// CI's `docker run <img> --version`); errors go to stderr.
+		runVersion(os.Stdout)
+		os.Exit(0)
+	}
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	cfg, err := reproxy.ParseFlags(fs, os.Args[1:])
@@ -76,6 +88,27 @@ func main() {
 		}
 	}
 	log.Printf("event=shutdown complete")
+}
+
+// versionRequested reports whether the first positional argument asks for
+// the version banner. It is checked before flag parsing so `reproxy
+// --version` works even alongside flags the FlagSet would reject.
+func versionRequested(args []string) bool {
+	return len(args) > 0 && args[0] == "--version"
+}
+
+// printVersion writes the version banner. It is a seam so tests can pin
+// the output shape (the CI smoke test asserts this exact line).
+func printVersion(w io.Writer) {
+	fmt.Fprintln(w, version)
+}
+
+// runVersion prints the version banner to w and reports success. main
+// exits 0 after it; the indirection keeps the branch unit-testable (the
+// stream under test is the one CI captures).
+func runVersion(w io.Writer) bool {
+	printVersion(w)
+	return true
 }
 
 // logStartup emits the startup summary: the listen address, the destination
