@@ -1,7 +1,7 @@
 # reproxy Protocol Contract
 
 > Executable contract for the retry policy carriers, request grammar, and proxy behavior.
-> Source: task 09-04-implement-reproxy-mvp (23/23 mutations), task 09-04-query-ownership-modes (29/29 mutations), task 09-06-no-phantom-migration, and task 09-07-v0-3-grammar-rewrite (4/4 mini-scan; mode axis deleted, policy moved to the scheme segment).
+> Source: task 09-04-implement-reproxy-mvp (23/23 mutations), task 09-04-query-ownership-modes (29/29 mutations), task 09-06-no-phantom-migration, task 09-07-v0-3-grammar-rewrite (mode axis deleted), and task 09-07-v0-4-leading-policy-segment (10/10 mutations; policy moved from the scheme segment to the leading `/+POLICY` segment, scheme returned to pure target).
 
 ---
 
@@ -12,12 +12,12 @@ Any change to request parsing, policy-carrier resolution, retry policy resolutio
 ## 2. Signatures
 
 ```go
-// target.go — path grammar parses the destination AND the segment policy
-// (eagerly validated: every path-level 400 fires before any body/SSRF work)
+// target.go — path grammar parses the destination AND the leading-segment
+// policy (eagerly validated: every path-level 400 fires before any body/SSRF work)
 func ParsePath(escapedPath string) (PathTarget, url.Values, *RequestError)
 // PathTarget stays a pure destination record (== comparable); the second
-// return is the parsed segment policy (nil = no +POLICY suffix — the only
-// no-policy spelling from the path).
+// return is the parsed leading-segment policy (nil = no /+POLICY segment —
+// the only no-policy spelling from the path).
 
 // header.go — the shared pair grammar and its two carriers
 func ParseRetryPolicyHeader(h http.Header) (url.Values, *RequestError) // nil = header absent
@@ -40,18 +40,19 @@ func ComputeWait(sp ScopePolicy, attemptNo int, retryAfterHeader string, now tim
 ### Request: path grammar
 
 ```
-PROXY-TARGET   := "/" SCHEME-SEGMENT "/" AUTHORITY [ "/" RAW-PATH ]
-SCHEME-SEGMENT := SCHEME [ "+" POLICY ]
-SCHEME         := "http" | "https"   // case-insensitive, lowercased
+PROXY-TARGET   := [ "/" "+" POLICY ] "/" SCHEME "/" AUTHORITY [ "/" RAW-PATH ]
+SCHEME         := "http" | "https"   // case-insensitive, lowercased — PURE TARGET
 POLICY         := pair (";" pair)*   // the shared pair grammar, ORIGINAL bytes, never lowercased
 ```
 
 - Plain form (`/https/host`): no policy from the path. Single attempt **unless the header channel supplies a policy**.
-- `+POLICY` form: the policy is parsed eagerly inside `ParsePath` (left-to-right: scheme → policy → authority).
-- `%2B` is not `+`: `/https%2Bstatus=5xx/host` is a 400 as the literal segment `https%2Bstatus=5xx` (original-bytes-first; `ParsePath` receives `r.URL.EscapedPath()` — never "simplify" to `r.URL.Path`).
+- Leading `/+POLICY` form: the control segment is dispatched by a single byte check at position 1 (original escaped bytes — `%2B` is not `+`), its body parsed with the shared pair grammar, then the scheme segment follows as a pure target.
+- Ladder precedence (inherited): scheme errors name the scheme BEFORE policy errors name the field — a second `+`-shaped segment (`/+a/+/https/h`) dies as `unsupported scheme "+"`, and the v0.3 weld (`/ftp+status=5xx/host`) dies as an unsupported scheme, not a policy 400.
+- `%2B` is not `+`: `/%2Bstatus=5xx/https/host` is a 400 as the literal segment `%2Bstatus=5xx` (original-bytes-first; `ParsePath` receives `r.URL.EscapedPath()` — never "simplify" to `r.URL.Path`).
 - The scheme part is case-insensitive (lowercased); the policy body is case-sensitive, matched on original escaped bytes.
-- Invalid forms → 400 naming the raw quoted segment; `usageHint` names both shapes.
-- **SECOND-SYSTEM GUARDRAIL** (doc comment at the parse site): the `+` slot speaks ONLY retry policy — no transport selectors, no feature flags, no additional namespaces. A future extension belongs in a new header or surface, not this slot.
+- `+` is control ONLY at segment position 1. In the target path it is data: `/https/host/+x` forwards `/+x` to the upstream verbatim.
+- Invalid forms → 400 naming the raw quoted segment; `usageHint` names both shapes (`[/+POLICY]/SCHEME/AUTHORITY[/PATH]`).
+- **SECOND-SYSTEM GUARDRAIL** (doc comment at the parse site): the leading `+` segment speaks ONLY retry policy; the scheme segment is pure target. v0.3 welded policy onto the scheme token; that grammar died in v0.4 as an unsupported scheme. No transport selectors, no feature flags, no additional namespaces may live in the `+` slot. A future extension belongs in a new header or surface, not this slot.
 
 ### Request: the query is unconditionally upstream-owned
 
@@ -61,14 +62,14 @@ POLICY         := pair (";" pair)*   // the shared pair grammar, ORIGINAL bytes,
 ### Request: the two policy carriers (one grammar)
 
 ```
-segment: /https+status=5xx;*.attempts=3;429.attempts=5/host/path?query
+segment: /+status=5xx;*.attempts=3;429.attempts=5/https/host/path?query
 header:  X-Reproxy-Retry-Policy: status=5xx; [*].attempts=3; [429].attempts=5
 ```
 
 - Both carriers feed the **shared pair grammar** (`parsePolicyPairList`): `key=value` pairs, `;`-separated, whitespace-trimmed (around pairs **and around the `=`**), values never contain `;` or `=`, never URL-decoded. The transform is pure into `retry.`-prefixed `url.Values` consumed by the same `Parse()` — identical validation matrix and 400 bodies, zero new field rules.
 - **Scope-key spelling is the only carrier difference**: the segment writes `*.FIELD` / `NNN.FIELD` (brackets are gen-delims, illegal in path segments); the header writes `[*].FIELD` / `[NNN].FIELD`. The dotted↔bracketed mapping is a total bijection, round-trip locked by tests.
 - Header mapper is total (unknown keys defer to `Parse`, preserving header error bodies); the segment mapper validates key shape **eagerly** — the bare-word rule below.
-- **Bare-word rule (no legacy detection)**: the KEY is validated BEFORE the `=`-presence check, so `/https+retry/host`, `/https+pure/host`, and `/https+foo/host` all die identically as the generic `unknown policy field` 400. One code path, no mode-word list, no historical branch, no old/legacy/v0.2 in error text. A *recognized* key missing its `=` still hits the fail-closed ladder.
+- **Bare-word rule (no legacy detection)**: the KEY is validated BEFORE the `=`-presence check, so `/+retry/https/host`, `/+pure/https/host`, and `/+foo/https/host` all die identically as the generic `unknown policy field` 400. One code path, no mode-word list, no historical branch, no old/legacy/v0.2 in error text. A *recognized* key missing its `=` still hits the fail-closed ladder.
 - Header: one occurrence only (multiple → 400). `X-Reproxy-*` is reserved on every request: unknown member → 400; all members stripped before forwarding upstream.
 
 ### Carrier matrix (the behavioral spec)
@@ -76,9 +77,9 @@ header:  X-Reproxy-Retry-Policy: status=5xx; [*].attempts=3; [429].attempts=5
 | Path | Header | Behavior |
 |---|---|---|
 | plain | no | Pure pass-through: query verbatim, body streams (no capture), single attempt (literal, D13), no X-Retry-* |
-| `+POLICY` | no | Retry per segment policy; query verbatim; capture runs |
+| `/+POLICY` | no | Retry per segment policy; query verbatim; capture runs |
 | plain | yes | Retry per header policy; query verbatim; capture runs |
-| `+POLICY` | yes | **400 conflict** — names both channels, remedy, middleware actor hint |
+| `/+POLICY` | yes | **400 conflict** — names both channels (leading policy segment), remedy, middleware actor hint |
 
 Invariant: the two carriers are mutually exclusive — fail-closed 400, never silent precedence.
 
@@ -111,7 +112,12 @@ built-in defaults -> retry[*].FIELD -> retry[NNN].FIELD
 | Condition | Result |
 |---|---|
 | Unknown policy field (bare word in segment: `retry`, `pure`, `foo`; malformed dotted scope) | 400, generic `unknown policy field` naming the key — identical for old mode words and any junk |
-| Unknown scheme-segment form (`https+retrt`, `%2B` forms) | 400 naming the raw quoted segment, hint names both shapes |
+| Unknown scheme-segment form (v0.3 weld `https+status=5xx`, `https+retry`; `%2B` forms) | 400 naming the raw quoted segment, hint names both shapes |
+| `/+statusx=5xx/https/h` (unknown field in the control segment) | 400, generic `unknown policy field` naming the key (shared ladder) |
+| `/+/https/h`, `/+` (empty control segment) | 400 naming the policy grammar — degenerate; absent is the only no-policy spelling |
+| `/+status=5xx` (no scheme follows the control segment) | 400 missing upstream scheme |
+| `/+a/+/https/h` (second `+`-shaped segment) | 400 `unsupported scheme "+"` — the ladder parses it as a scheme |
+| `/https/host/+x` (`+` in the target path) | Not an error — forwarded byte-for-byte (`+` is control only at segment position 1) |
 | Segment policy + `X-Reproxy-Retry-Policy` both present | 400 conflict — names both channels, remedy (drop one), middleware actor hint |
 | Unknown `X-Reproxy-Foo` header | 400 (reserved namespace, every request) |
 | Multiple `X-Reproxy-Retry-Policy` occurrences | 400 |
@@ -127,25 +133,28 @@ built-in defaults -> retry[*].FIELD -> retry[NNN].FIELD
 
 ## 5. Good/Base/Bad Cases
 
-- Good: `/https+status=5xx;*.attempts=4;429.attempts=2/host/x` — 429 uses attempts=2, everything else in the gate uses 4.
-- Good: `/https+status=5xx/host/x?retry.count=5` — headline property: `retry.count` is target data, reaches the upstream verbatim, policy drives retries.
+- Good: `/+status=5xx;*.attempts=4;429.attempts=2/https/host/x` — 429 uses attempts=2, everything else in the gate uses 4.
+- Good: `/+status=5xx/https/host/x?retry.count=5` — headline property: `retry.count` is target data, reaches the upstream verbatim, policy drives retries.
 - Good: `/https/host` + `X-Reproxy-Retry-Policy: status=5xx; [*].attempts=3` — header policy drives retries, query untouched.
+- Good: `/https/host/+x` — the `+` is target data, forwarded verbatim.
 - Base: `/https/host/x?y=1` — pure reverse proxy, single attempt, zero behavioral overhead.
-- Bad: `/https+status=429;500.attempts=2/host` — 400 dead config (500 not in gate).
-- Bad: `/https+status=5xx/host` + policy header — 400 both-carriers conflict.
-- Bad: `/https+retry/host` — the generic unknown-field 400, same as `+foo` (no legacy branch exists).
+- Bad: `/+status=429;500.attempts=2/https/host` — 400 dead config (500 not in gate).
+- Bad: `/+status=5xx/https/host` + policy header — 400 both-carriers conflict.
+- Bad: `/+retry/https/host` — the generic unknown-field 400, same as `+foo` (no legacy branch exists).
+- Bad: `/https+status=5xx/host` — the v0.3 death shape: 400 `unsupported scheme "https+status=5xx"` quoting the raw segment.
+- Bad: `/+a/+/https/host` — 400 `unsupported scheme "+"` (one control segment only).
 
 ## 6. Tests Required
 
 - Byte preservation: `TestProxyQueryBytePreservation`, `TestE2EQueryBytePreservation`, `TestProxySegmentPolicyQueryIsTargetData` (query verbatim INCLUDING on policy paths — the v0.3.0 headline).
-- Path grammar: `target_test.go` grammar table (plain / `+POLICY` forms × schemes × case variants; `%2B` rows; whitespace-around-`=` rows).
+- Path grammar: `target_test.go` grammar table (plain / `/+POLICY` forms × schemes × case variants; `%2B` rows; whitespace-around-`=` rows; v0.3 death-shape rows; `/+`-in-target-path rows).
 - Carrier matrix: `TestProxyPolicyChannelConflictMatrix` (every §3 row), `TestE2EPolicyChannelConflictOverTCP`.
 - One-grammar lock: `TestParsePathSegmentHeaderGrammarEquivalence` (segment vs header → deep-equal Policy), `TestSegmentBracketBijection` (dotted↔bracketed round trip), `TestHeaderTransformEquivalence`.
 - Policy-less path: `TestProxyPlainQueryVerbatimAndSingleCall`, `TestProxyPlainBodyStreamsNoCapture` (incl. ContentLength framing assertion).
 - Log line: `TestProxyRequestLogCarriesPolicySource` asserting `policy=segment|header|none`.
 - Order independence: `TestParseFieldOrderIndependence` (50 iterations — map iteration order must not change the verdict).
 - Dead config: `TestParseDeadConfig` + `TestProxyDeadConfig400`.
-- Mutation lock: every row of the validation matrix has a test that fails when the behavior is broken (see mutation-scan.md in the task dir — m4–m7 killed).
+- Mutation lock: every row of the validation matrix has a test that fails when the behavior is broken (see mutation-scan.md in the task dir — m1–m10 killed, including the new ladder rows).
 
 ## 7. Wrong vs Correct
 
@@ -164,12 +173,19 @@ policy = Parse(url.Values{}, cfg)
 ```
 
 ```go
-// Special-casing old mode words (v0.3.0 has NO legacy detection):
+// Special-casing old mode words (v0.4.0 has NO legacy detection):
 if policyField == "retry" || policyField == "pure" {
     return bad("legacy mode word removed in v0.3.0 ...")
 }
 // The grammar is forward-looking only; +retry dies as the SAME generic
 // unknown-policy-field 400 as +foo — no word list, no history in errors
+```
+
+```go
+// Restoring a "+" cut inside the scheme segment (the v0.3 weld):
+schemePart, policyPart, _ := strings.Cut(segment, "+")
+// v0.4's scheme segment is a pure target; the weld died as an unsupported
+// scheme. A "+" in the segment is an error, never a policy carrier.
 ```
 
 ### Correct
@@ -194,4 +210,15 @@ if !found {
     }
     ...
 }
+```
+
+```go
+// Leading control segment: one byte check at position 1, original bytes:
+if strings.HasPrefix(rest, "+") {
+    policySeg, rest = /* body up to next "/" */
+    params, rerr := parsePolicyPairList(policySeg, segmentCarrier)
+    ...
+}
+// Then the scheme segment — pure target, strict {http, https} table:
+scheme, rerr := parseSchemeSegment(schemeSeg)
 ```

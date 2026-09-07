@@ -1,13 +1,14 @@
 # reproxy
 
 reproxy is a lightweight, stateless, general-purpose HTTP retry reverse proxy.
-The upstream destination and (optionally) the retry policy are both expressed
-in the request path, so any client that can build a URL can ask for retries on
-a per-request basis — no sidecar config files, no per-route server
-configuration. It ships as a single Go binary built on the standard library
-only (zero external dependencies), streams request and response bodies
-(including `text/event-stream`), and enforces server-side destination
-restrictions so it cannot be used as an open relay.
+The upstream destination is expressed in the request path and the retry
+policy (optionally) rides a leading `/+`-prefixed segment in front of it, so
+any client that can build a URL can ask for retries on a per-request basis —
+no sidecar config files, no per-route server configuration. It ships as a
+single Go binary built on the standard library only (zero external
+dependencies), streams request and response bodies (including
+`text/event-stream`), and enforces server-side destination restrictions so it
+cannot be used as an open relay.
 
 ## Quick start
 
@@ -17,7 +18,7 @@ go build ./cmd/reproxy        # produces ./reproxy
 ```
 
 ```sh
-curl "http://localhost:8080/https+status=500,502-504;*.attempts=3/example.com/api"
+curl "http://localhost:8080/+status=500,502-504;*.attempts=3/https/example.com/api"
 ```
 
 A binary built this way reports `--version` as `dev`; release builds are
@@ -41,7 +42,7 @@ Or as a compose file (`docker compose up -d`):
 ```yaml
 services:
   reproxy:
-    image: ghcr.io/killbus/reproxy:v0.3.0   # pinned version
+    image: ghcr.io/killbus/reproxy:v0.4.0   # pinned version
     command: ["--allowlist", "api.example.com"]
     ports: ["8080:8080"]
     restart: unless-stopped
@@ -54,7 +55,7 @@ upstream would fail.
 
 ### Tag semantics
 
-- **Version tags** (`v0.1.0`, `v0.3.0`, …) are **immutable**: each is pushed
+- **Version tags** (`v0.1.0`, `v0.4.0`, …) are **immutable**: each is pushed
   once at release time and never re-pushed. What a version tag pointed to
   yesterday is what it points to forever. Pin production deployments to a
   version tag.
@@ -64,7 +65,7 @@ upstream would fail.
   from; `dev` for local builds):
 
 ```sh
-docker run --rm ghcr.io/killbus/reproxy:v0.3.0 --version
+docker run --rm ghcr.io/killbus/reproxy:v0.4.0 --version
 ```
 
 ### Building locally
@@ -96,17 +97,23 @@ services:
 
 ## How it works
 
-The request path carries the upstream target and, after a `+`, the retry
-policy. The query belongs to the target and is always forwarded untouched:
+The request path carries an optional retry policy in a leading control
+segment, then the upstream target. The query belongs to the target and is
+always forwarded untouched:
 
 ```
-/<scheme>[+<policy>]/<host>[:port]/<path>?<query>
+[/+<policy>]/<scheme>/<host>[:port]/<path>?<query>
 ```
 
-- `<scheme>` is `http` or `https`; anything else is a 400.
-- `<policy>` is a retry policy (see below). Its absence — a plain
+- `<policy>` is a retry policy (see below) riding the leading `/+`-prefixed
+  segment — reproxy's own URL surface. Its absence — a plain
   `/https/host/...` path — means single attempt, no retry. Absent is the only
-  no-policy spelling: a bare `+` or an unparseable policy body is a 400.
+  no-policy spelling: a bare `/+` or an unparseable policy body is a 400.
+- `<scheme>` is `http` or `https` — a pure target that reports only the
+  destination protocol; anything else is a 400. A `+` welded onto the scheme
+  token (`/https+status=5xx/host`, the v0.3 spelling) is not a policy
+  carrier: it fails scheme validation as the literal segment
+  `https+status=5xx`.
 - Default ports: `http` → 80, `https` → 443. An explicit port wins. Ports must
   be 1–65535 in plain decimal; leading zeros are rejected.
 - `<host>` may be a DNS name, an IPv4 literal, or a bracketed IPv6 literal
@@ -116,11 +123,20 @@ policy. The query belongs to the target and is always forwarded untouched:
   `https://h/`.
 - The path is forwarded **as raw bytes** — never decoded or re-encoded — so
   canonical encodings required by signed URLs survive intact. This includes
-  the scheme segment: `%2B` is not `+`, so `/https%2Bstatus=5xx/host/...` is
+  the first segment: `%2B` is not `+`, so `/%2Bstatus=5xx/https/host/...` is
   not a policy-carrying path — it fails scheme validation as the literal
-  segment `https%2Bstatus=5xx`.
+  segment `%2Bstatus=5xx`.
+- A `+` is control only at segment position 1. In the target path it is
+  ordinary data: `/https/host/+x` forwards `/+x` to the upstream verbatim.
 - The scheme part is case-insensitive (`/HTTPS/...` works); the policy body
-  after `+` is matched on original bytes and is case-sensitive.
+  after `/+` is matched on original bytes and is case-sensitive.
+
+Three properties define reproxy's URL surface:
+
+- reproxy owns exactly one URL surface — the leading `/+`-prefixed segment
+  (when present).
+- The scheme segment is pure target.
+- The `+` slot speaks only retry policy.
 
 ## The retry policy
 
@@ -129,13 +145,14 @@ whitespace around pairs and around the `=`. Two carriers accept the same
 grammar:
 
 ```
-/https+status=5xx;*.attempts=3;429.attempts=5/host/path?query   (path segment)
+/+status=5xx;*.attempts=3;429.attempts=5/https/host/path?query   (leading path segment)
 X-Reproxy-Retry-Policy: status=5xx; [*].attempts=3; [429].attempts=5   (header)
 ```
 
-- **Path segment** — the policy rides the scheme segment after a `+`. Scope
-  keys are dotted (`*.attempts`, `429.attempts`) because brackets are illegal
-  in a path segment; gates are bare words (`status`, `network`, `budget`).
+- **Leading path segment** — the policy rides the leading `/+`-prefixed
+  segment. Scope keys are dotted (`*.attempts`, `429.attempts`) because
+  brackets are illegal in a path segment; gates are bare words (`status`,
+  `network`, `budget`).
 - **Header** — `X-Reproxy-Retry-Policy` carries the same policy with bracketed
   scope spellings (`[*].attempts`, `[429].attempts`), which are legal in a
   header value. See [the header channel](#the-header-channel-x-reproxy-retry-policy).
@@ -147,9 +164,10 @@ same 400 bodies either way. A key that is neither a gate nor a dotted scope
 as an unknown policy field; there is no other `+` vocabulary and no
 identifier slot.
 
-The two carriers are **mutually exclusive**: a policy in the path segment plus
-the header is a 400 naming both channels and the remedy. The plain path plus
-the header is the intended header-channel combination, not a conflict.
+The two carriers are **mutually exclusive**: a policy in the leading path
+segment plus the header is a 400 naming both channels and the remedy. The
+plain path plus the header is the intended header-channel combination, not
+a conflict.
 
 ### Plain path semantics
 
@@ -196,10 +214,11 @@ X-Reproxy-Retry-Policy: status=5xx; network=1; budget=30s; [*].attempts=3; [429]
   `X-Reproxy-Foo` is a 400 (fail closed), on every request regardless of
   carrier. All `X-Reproxy-*` headers are stripped before the request is
   forwarded upstream.
-- Using both carriers at once — a policy in the path segment plus the
-  header — is a 400 naming the conflict and the remedy ("remove the header,
-  or drop the policy from the path"). If you did not set this header, a
-  middleware or gateway between you and reproxy may have added it.
+- Using both carriers at once — a policy in the leading path segment plus
+  the header — is a 400 naming the conflict and the remedy ("remove the
+  header, or drop the policy from the path"). If you did not set this
+  header, a middleware or gateway between you and reproxy may have added
+  it.
 
 ## Retry fields
 
@@ -440,6 +459,15 @@ zero-mode grammar documented here. The `+` slot now speaks only retry
 policy. This is a documentation-level history note: the runtime has no
 compatibility mode and no special-casing for the earlier spellings — a word
 there that is not a policy key is a plain unknown-field 400.
+
+v0.3 then welded the policy onto the scheme token itself
+(`/https+status=5xx/host`); v0.4 moved it to the leading segment
+(`/+status=5xx/https/host`) so the scheme returns to being a pure target —
+the policy is an adverb on the request, not a noun in the destination. That
+welded spelling now dies as an unsupported scheme naming the raw segment,
+the same fail-closed 400 as any other unknown scheme. The plain form
+(`/https/host/...`) has been byte-stable since v0.1.0 and remains
+unchanged.
 
 ## Limitations / future work
 

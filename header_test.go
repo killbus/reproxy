@@ -296,11 +296,11 @@ func TestHeaderLegitimateValuesRepresentable(t *testing.T) {
 	}
 }
 
-// TestHeaderTransformEquivalence: the same policy via the scheme segment
-// (ParsePath) and via the header (ParseRetryPolicyHeader) resolves to
+// TestHeaderTransformEquivalence: the same policy via the leading policy
+// segment (ParsePath) and via the header (ParseRetryPolicyHeader) resolves to
 // deep-equal Policies — one grammar, two carriers, a pure channel swap.
 func TestHeaderTransformEquivalence(t *testing.T) {
-	segmentPath := "/https+status=429,5xx;network=1;budget=30s;*.attempts=3;*.backoff=linear;429.attempts=5/h"
+	segmentPath := "/+status=429,5xx;network=1;budget=30s;*.attempts=3;*.backoff=linear;429.attempts=5/https/h"
 	headerVal := "status=429,5xx; network=1; budget=30s; [*].attempts=3; [*].backoff=linear; [429].attempts=5"
 
 	_, viaSegment, rerr := ParsePath(segmentPath)

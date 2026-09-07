@@ -1,8 +1,8 @@
 package reproxy
 
 // header.go implements the retry control-plane policy grammar and its two
-// carriers (v0.3): the request header X-Reproxy-Retry-Policy and the scheme
-// segment of the proxy path (/https+POLICY/host). Both carriers speak ONE
+// carriers: the request header X-Reproxy-Retry-Policy and the leading policy
+// segment of the proxy path (/+POLICY/https/host). Both carriers speak ONE
 // grammar — semicolon-separated key=value pairs, whitespace-trimmed — fed
 // through a shared pure transform into the url.Values shape policy.Parse
 // consumes, so the two carriers get Parse's whole validation matrix and error
@@ -43,7 +43,7 @@ type carrierName string
 
 const (
 	carrierHeader  carrierName = "X-Reproxy-Retry-Policy header"
-	carrierSegment carrierName = "path scheme segment"
+	carrierSegment carrierName = "leading policy segment"
 )
 
 // policyCarrier is the per-carrier configuration of the shared pair grammar:
@@ -210,7 +210,7 @@ func queryKeyForHeaderKey(key string) (string, *RequestError) {
 	return "retry." + key, nil
 }
 
-// queryKeyForSegmentKey maps a scheme-segment policy key to the
+// queryKeyForSegmentKey maps a leading-policy-segment key to the
 // retry.-prefixed spelling Parse expects. The segment cannot carry brackets
 // (gen-delims, illegal in path segments), so scopes are dotted:
 //
@@ -254,7 +254,7 @@ func queryKeyForSegmentKey(key string) (string, *RequestError) {
 // validateReproxyNamespace enforces the reserved X-Reproxy-* request-header
 // namespace: any member other than RetryPolicyHeader is a 400 on every
 // request in every mode — fail closed. ParseRetryPolicyHeader runs it;
-// callers that take their policy from the scheme segment must run it
+// callers that take their policy from the leading segment must run it
 // separately so the namespace stays reserved everywhere.
 func validateReproxyNamespace(h http.Header) *RequestError {
 	for name := range h {

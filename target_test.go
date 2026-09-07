@@ -24,66 +24,70 @@ func TestParsePath(t *testing.T) {
 		{"unknown scheme ftp", "/ftp/example.com/x", PathTarget{}, nil, "unsupported scheme", "SCHEME http or https"},
 		{"scheme uppercase accepted", "/HTTPS/example.com", PathTarget{"https", "example.com", 0, "/"}, nil, "", ""},
 
-		// --- Scheme-segment policy ({plain, +POLICY} x {http, https}) ---
-		{"policy full https", "/https+status=5xx;*.attempts=3;429.attempts=5/example.com/x", PathTarget{"https", "example.com", 0, "/x"}, map[string]string{
+		// --- Leading policy segment (/+POLICY x {http, https}) ---
+		{"policy full https", "/+status=5xx;*.attempts=3;429.attempts=5/https/example.com/x", PathTarget{"https", "example.com", 0, "/x"}, map[string]string{
 			"retry.status": "5xx", "retry[*].attempts": "3", "retry[429].attempts": "5",
 		}, "", ""},
-		{"policy http with port", "/http+network=1;budget=30s/h.dev:4000/v1/x", PathTarget{"http", "h.dev", 4000, "/v1/x"}, map[string]string{
+		{"policy http with port", "/+network=1;budget=30s/http/h.dev:4000/v1/x", PathTarget{"http", "h.dev", 4000, "/v1/x"}, map[string]string{
 			"retry.network": "1", "retry.budget": "30s",
 		}, "", ""},
-		{"policy single gate", "/https+status=429/example.com/x", PathTarget{"https", "example.com", 0, "/x"}, map[string]string{
+		{"policy single gate", "/+status=429/https/example.com/x", PathTarget{"https", "example.com", 0, "/x"}, map[string]string{
 			"retry.status": "429",
 		}, "", ""},
-		{"policy key case-sensitive", "/HTTPS+STATUS=429/example.com", PathTarget{}, nil, "unknown policy field", "status"},
-		{"policy scheme lowercase with policy", "/Https+status=429/example.com", PathTarget{"https", "example.com", 0, "/"}, map[string]string{
+		{"policy key case-sensitive", "/+STATUS=429/https/example.com", PathTarget{}, nil, "unknown policy field", "status"},
+		{"policy scheme lowercase after policy", "/+status=429/Https/example.com", PathTarget{"https", "example.com", 0, "/"}, map[string]string{
 			"retry.status": "429",
 		}, "", ""},
-		{"policy whitespace around pairs", "/https+ status=429 ; network=0 /example.com", PathTarget{"https", "example.com", 0, "/"}, map[string]string{
+		{"policy whitespace around pairs", "/+ status=429 ; network=0 /https/example.com", PathTarget{"https", "example.com", 0, "/"}, map[string]string{
 			"retry.status": "429", "retry.network": "0",
 		}, "", ""},
-		{"policy whitespace around equals", "/https+status = 429;network=0/example.com/x", PathTarget{"https", "example.com", 0, "/x"}, map[string]string{
+		{"policy whitespace around equals", "/+status = 429;network=0/https/example.com/x", PathTarget{"https", "example.com", 0, "/x"}, map[string]string{
 			"retry.status": "429", "retry.network": "0",
 		}, "", ""},
-		{"policy empty path normalizes", "/https+status=429/example.com", PathTarget{"https", "example.com", 0, "/"}, map[string]string{
+		{"policy empty path normalizes", "/+status=429/https/example.com", PathTarget{"https", "example.com", 0, "/"}, map[string]string{
 			"retry.status": "429",
 		}, "", ""},
-		{"policy with ipv6", "/https+status=5xx/[2001:db8::1]/x", PathTarget{"https", "2001:db8::1", 0, "/x"}, map[string]string{
+		{"policy with ipv6", "/+status=5xx/https/[2001:db8::1]/x", PathTarget{"https", "2001:db8::1", 0, "/x"}, map[string]string{
 			"retry.status": "5xx",
 		}, "", ""},
-		{"policy raw path preserved", "/https+status=5xx/h/a%2Fb%20c+d", PathTarget{"https", "h", 0, "/a%2Fb%20c+d"}, map[string]string{
+		{"policy raw path preserved", "/+status=5xx/https/h/a%2Fb%20c+d", PathTarget{"https", "h", 0, "/a%2Fb%20c+d"}, map[string]string{
 			"retry.status": "5xx",
 		}, "", ""},
-		{"policy values never lowercased", "/https+status=5XX/h", PathTarget{"https", "h", 0, "/"}, map[string]string{
+		{"policy values never lowercased", "/+status=5XX/https/h", PathTarget{"https", "h", 0, "/"}, map[string]string{
 			"retry.status": "5XX",
 		}, "", ""},
 
 		// --- Bare-word rule: any bare word is the generic unknown-field 400 ---
 		// (any word not in the key set dies identically)
-		{"bare word retry", "/https+retry/example.com/x", PathTarget{}, nil, `unknown policy field "retry"`, "status, network, budget"},
-		{"bare word pure", "/https+pure/example.com/x", PathTarget{}, nil, `unknown policy field "pure"`, "status, network, budget"},
-		{"bare word foo", "/https+foo/example.com/x", PathTarget{}, nil, `unknown policy field "foo"`, "status, network, budget"},
-		{"bare word uppercase", "/https+RETRY/example.com/x", PathTarget{}, nil, `unknown policy field "RETRY"`, "status, network, budget"},
+		{"bare word retry", "/+retry/https/example.com/x", PathTarget{}, nil, `unknown policy field "retry"`, "status, network, budget"},
+		{"bare word pure", "/+pure/https/example.com/x", PathTarget{}, nil, `unknown policy field "pure"`, "status, network, budget"},
+		{"bare word foo", "/+foo/https/example.com/x", PathTarget{}, nil, `unknown policy field "foo"`, "status, network, budget"},
+		{"bare word uppercase", "/+RETRY/https/example.com/x", PathTarget{}, nil, `unknown policy field "RETRY"`, "status, network, budget"},
 
-		// --- Fail-closed ladder on the segment policy ---
-		{"policy key without equals", "/https+status/example.com/x", PathTarget{}, nil, "is not key=value", "key=value"},
-		{"empty policy after plus", "/https+/example.com/x", PathTarget{}, nil, "is present but empty", "status=5xx"},
-		{"whitespace-only policy", "/https+  /example.com/x", PathTarget{}, nil, "is present but empty", "status=5xx"},
-		{"escaped whitespace is not whitespace", "/https+%20%20/example.com/x", PathTarget{}, nil, "unknown policy field", "status, network, budget"},
-		{"empty pair in policy", "/https+status=5xx;;network=1/example.com/x", PathTarget{}, nil, "empty pair", "single \";\""},
-		{"trailing separator", "/https+status=5xx;/example.com/x", PathTarget{}, nil, "empty pair", "single \";\""},
-		{"leading separator", "/https+;status=5xx/example.com/x", PathTarget{}, nil, "empty pair", "single \";\""},
-		{"empty key in policy", "/https+=5xx/example.com/x", PathTarget{}, nil, "empty key", "status, network, budget"},
-		{"value containing equals", "/https+status=429=500/example.com/x", PathTarget{}, nil, "contains \"=\"", "values never contain"},
-		{"unknown gate word", "/https+attempt=3/example.com/x", PathTarget{}, nil, "unknown policy field", "status, network, budget"},
-		{"non-digit scope", "/https+42.attempts=2/example.com/x", PathTarget{}, nil, "unknown policy field", "status, network, budget"},
-		{"policy without authority", "/https+status=5xx", PathTarget{}, nil, "missing upstream authority", "SCHEME"},
+		// --- Fail-closed ladder on the leading-segment policy ---
+		{"policy key without equals", "/+status/https/example.com/x", PathTarget{}, nil, "is not key=value", "key=value"},
+		{"empty policy after plus", "/+/https/example.com/x", PathTarget{}, nil, "is present but empty", "status=5xx"},
+		{"empty policy alone", "/+", PathTarget{}, nil, "is present but empty", "status=5xx"},
+		{"whitespace-only policy", "/+  /https/example.com/x", PathTarget{}, nil, "is present but empty", "status=5xx"},
+		{"escaped whitespace is not whitespace", "/+%20%20/https/example.com/x", PathTarget{}, nil, "unknown policy field", "status, network, budget"},
+		{"empty pair in policy", "/+status=5xx;;network=1/https/example.com/x", PathTarget{}, nil, "empty pair", "single \";\""},
+		{"trailing separator", "/+status=5xx;/https/example.com/x", PathTarget{}, nil, "empty pair", "single \";\""},
+		{"leading separator", "/+;status=5xx/https/example.com/x", PathTarget{}, nil, "empty pair", "single \";\""},
+		{"empty key in policy", "/+=5xx/https/example.com/x", PathTarget{}, nil, "empty key", "status, network, budget"},
+		{"value containing equals", "/+status=429=500/https/example.com/x", PathTarget{}, nil, "contains \"=\"", "values never contain"},
+		{"unknown gate word", "/+attempt=3/https/example.com/x", PathTarget{}, nil, "unknown policy field", "status, network, budget"},
+		{"non-digit scope", "/+42.attempts=2/https/example.com/x", PathTarget{}, nil, "unknown policy field", "status, network, budget"},
+		{"policy without scheme follows", "/+status=5xx", PathTarget{}, nil, "missing upstream scheme", "SCHEME"},
+		{"policy with no scheme after slash", "/+status=5xx/", PathTarget{}, nil, "missing upstream scheme", "SCHEME"},
 
-		// --- Scheme-segment grammar edges ---
-		{"policy without scheme", "/+status=5xx/example.com/x", PathTarget{}, nil, `unsupported scheme "+status=5xx"`, "SCHEME"},
-		{"bare plus segment", "/+/example.com/x", PathTarget{}, nil, `unsupported scheme "+"`, "SCHEME"},
+		// --- Leading-segment grammar edges (R3 ladder) ---
+		{"unknown policy field in segment", "/+statusx=5xx/https/h", PathTarget{}, nil, `unknown policy field "statusx"`, "status, network, budget"},
+		{"second plus segment is a scheme", "/+a/+/https/h", PathTarget{}, nil, `unsupported scheme "+"`, "SCHEME"},
+		{"escaped plus leading is a scheme", "/%2Bstatus=5xx/https/h", PathTarget{}, nil, `unsupported scheme "%2Bstatus=5xx"`, "SCHEME"},
+		{"v0.3 death shape unsupported scheme", "/https+status=5xx/h", PathTarget{}, nil, `unsupported scheme "https+status=5xx"`, "SCHEME"},
+		{"v0.3 death shape bare word", "/https+retry/h", PathTarget{}, nil, `unsupported scheme "https+retry"`, "SCHEME"},
 		{"bang separator", "/https!retry/example.com/x", PathTarget{}, nil, `unsupported scheme "https!retry"`, "SCHEME"},
 		{"unknown scheme rx", "/rx/example.com/x", PathTarget{}, nil, `unsupported scheme "rx"`, "SCHEME"},
-		{"unknown scheme with policy", "/ftp+status=5xx/example.com/x", PathTarget{}, nil, `unsupported scheme "ftp+status=5xx"`, "SCHEME"},
 		{"escaped plus is not a policy", "/https%2Bstatus=5xx/example.com/x", PathTarget{}, nil, `unsupported scheme "https%2Bstatus=5xx"`, "SCHEME"},
 		{"escaped plus lowercase hex is not a policy", "/https%2bstatus=5xx/example.com/x", PathTarget{}, nil, `unsupported scheme "https%2bstatus=5xx"`, "SCHEME"},
 
@@ -100,6 +104,8 @@ func TestParsePath(t *testing.T) {
 		{"encoded bytes preserved", "/https/h/a%2Fb%20c+d", PathTarget{"https", "h", 0, "/a%2Fb%20c+d"}, nil, "", ""},
 		{"percent in path preserved", "/https/h/%zz", PathTarget{"https", "h", 0, "/%zz"}, nil, "", ""},
 		{"plus in raw path is not policy", "/https/h/a+b+c", PathTarget{"https", "h", 0, "/a+b+c"}, nil, "", ""},
+		{"plus-leading path segment is target data", "/https/host/+x", PathTarget{"https", "host", 0, "/+x"}, nil, "", ""},
+		{"plus-leading deep path segments are target data", "/https/h/+a/+b", PathTarget{"https", "h", 0, "/+a/+b"}, nil, "", ""},
 
 		// --- Ports ---
 		{"explicit https port", "/https/h:8443/x", PathTarget{"https", "h", 8443, "/x"}, nil, "", ""},
@@ -196,10 +202,10 @@ func TestParsePath(t *testing.T) {
 }
 
 // TestParsePathSegmentHeaderGrammarEquivalence: the same policy through the
-// scheme segment (dotted scopes) and the policy header (bracketed scopes)
-// yields the SAME url.Values — one grammar, two carriers.
+// leading policy segment (dotted scopes) and the policy header (bracketed
+// scopes) yields the SAME url.Values — one grammar, two carriers.
 func TestParsePathSegmentHeaderGrammarEquivalence(t *testing.T) {
-	segment := "/https+status=5xx;network=1;budget=30s;*.attempts=3;429.attempts=5/example.com/x"
+	segment := "/+status=5xx;network=1;budget=30s;*.attempts=3;429.attempts=5/https/example.com/x"
 	headerVal := "status=5xx; network=1; budget=30s; [*].attempts=3; [429].attempts=5"
 
 	_, viaSegment, rerr := ParsePath(segment)
@@ -267,7 +273,7 @@ func TestSegmentBracketBijection(t *testing.T) {
 		{"status=5xx;*.attempts=3", "status=5xx; [*].attempts=3"},
 		{"status=429,5xx;429.initial=100ms", "status=429,5xx; [429].initial=100ms"},
 	} {
-		_, seg, rerr := ParsePath("/https+" + pair[0] + "/h")
+		_, seg, rerr := ParsePath("/+" + pair[0] + "/https/h")
 		if rerr != nil {
 			t.Fatalf("segment %q: %v", pair[0], rerr)
 		}
@@ -301,7 +307,7 @@ func TestPathTargetNormalizeAndRendering(t *testing.T) {
 		{"root path elided in url", PathTarget{"https", "h", 0, "/"}, 443, "h:443", "https://h:443/"},
 		{"raw path preserved in url", PathTarget{"https", "h", 0, "/a%2Fb"}, 443, "h:443", "https://h:443/a%2Fb"},
 		// The policy is orthogonal to destination rendering: HostPort/URL/
-		// Normalize behave identically with or without a segment policy.
+		// Normalize behave identically with or without a leading-segment policy.
 		{"explicit kept with policy carrier", PathTarget{"http", "h", 8080, "/x"}, 8080, "h:8080", "http://h:8080/x"},
 	}
 	for _, tt := range tests {

@@ -1,0 +1,1 @@
+{"file": ".trellis/spec/backend/retry-proxy-contract.md", "reason": "Check agent validates the implementation against the rewritten contract: every matrix row test-locked"}

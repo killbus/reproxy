@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/retry-proxy-contract.md", "reason": "The protocol contract being rewritten: grammar block, carrier matrix, error matrix — the implement agent rewrites target.go/header.go/proxy.go against this spec and updates it last"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Mutation discipline: isolated copy, revert + diff-verify, compile failure != capture"}

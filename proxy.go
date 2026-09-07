@@ -1,7 +1,7 @@
 package reproxy
 
 // proxy.go implements the core retry reverse proxy (R5 + R6): the request
-// pipeline (parse target + segment policy -> resolve policy carrier -> capture
+// pipeline (parse target + leading-segment policy -> resolve policy carrier -> capture
 // body -> SSRF gates -> attempt loop) and the commit-point guard.
 
 import (
@@ -145,18 +145,18 @@ func forwardedProto(r *http.Request) string {
 
 // ServeHTTP implements the request pipeline:
 //
-//	parse target + optional segment policy -> resolve the policy carrier
+//	parse target + optional leading-segment policy -> resolve the policy carrier
 //	(segment OR header, never both) -> body (capture only when a retry
 //	lifecycle exists) -> SSRF gates (allowlist, resolve-then-pin)
 //	-> attempt loop -> COMMIT (headers written, body streamed) or exhaustion.
 //
 // The query is unconditionally upstream-owned: RawQuery is forwarded
 // byte-identical on every path, including retry.*-shaped keys (target data).
-// A retry lifecycle exists iff a policy is present — carried in the scheme
-// segment (/https+POLICY/host) or the X-Reproxy-Retry-Policy header. No
+// A retry lifecycle exists iff a policy is present — carried in the leading
+// policy segment (/+POLICY/https/host) or the X-Reproxy-Retry-Policy header. No
 // policy: single attempt (the literal), body streams, no X-Retry-* headers.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// (1) Target and optional segment policy from the path.
+	// (1) Target and optional leading-segment policy from the path.
 	target, segmentParams, rerr := ParsePath(r.URL.EscapedPath())
 	if rerr != nil {
 		rerr.Write(w)
@@ -167,7 +167,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// (2) Policy carrier resolution. Exactly one carrier may speak: a
-	// segment policy and a header policy together are a 400 (fail closed,
+	// leading-segment policy and a header policy together are a 400 (fail closed,
 	// never silent precedence). retryLifecycle reports whether a retry
 	// lifecycle exists at all (a policy is present); it gates body capture
 	// (D14) and the X-Retry-* observability headers.
@@ -189,8 +189,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case segmentParams != nil && headerParams != nil:
 		(&RequestError{
 			Code:   400,
-			Reason: fmt.Sprintf("both policy channels are in use: the path's scheme segment carries a policy while the %s header carries another", RetryPolicyHeader),
-			Hint:   "the scheme-segment channel and the header channel are mutually exclusive: remove the header, or drop the policy from the path (e.g. use /https/host); if you did not set this header, a middleware or gateway between you and reproxy may have added it",
+			Reason: fmt.Sprintf("both policy channels are in use: the path's leading policy segment carries a policy while the %s header carries another", RetryPolicyHeader),
+			Hint:   "the leading-policy-segment channel and the header channel are mutually exclusive: remove the header, or drop the policy from the path (e.g. use /https/host); if you did not set this header, a middleware or gateway between you and reproxy may have added it",
 		}).Write(w)
 		return
 	case segmentParams != nil:

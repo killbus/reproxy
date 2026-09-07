@@ -101,7 +101,7 @@ func newE2EEnv(t *testing.T, upstreamHandler http.HandlerFunc, cfg *ServerConfig
 }
 
 // get performs a client GET against the proxy with the given target path
-// (e.g. "/http+status=500/up.example.com/x").
+// (e.g. "/+status=500/http/up.example.com/x").
 func (e *e2eEnv) get(t *testing.T, target string) *http.Response {
 	t.Helper()
 	resp, err := e.client.Get(e.proxy.URL + target)
@@ -153,7 +153,7 @@ func (e *e2eEnv) counted(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// TestE2EHappyPathGET: /http+POLICY/<host>/path?x=1 relays the upstream
+// TestE2EHappyPathGET: /+POLICY/http/<host>/path?x=1 relays the upstream
 // response with X-Retry-Count: 1 and the original query intact.
 func TestE2EHappyPathGET(t *testing.T) {
 	env := newE2EEnv(t, func(w http.ResponseWriter, r *http.Request) {
@@ -165,7 +165,7 @@ func TestE2EHappyPathGET(t *testing.T) {
 	}, nil)
 	_ = env
 
-	resp := env.get(t, "/http+status=500/up.example.com/path?x=1")
+	resp := env.get(t, "/+status=500/http/up.example.com/path?x=1")
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -191,7 +191,7 @@ func TestE2ERetryToSuccess(t *testing.T) {
 		_, _ = w.Write([]byte("third time"))
 	}, nil)
 
-	resp := env.get(t, "/http+status=500;*.attempts=3;*.initial=1ms;*.max=2ms;*.jitter=none/up.example.com/x")
+	resp := env.get(t, "/+status=500;*.attempts=3;*.initial=1ms;*.max=2ms;*.jitter=none/http/up.example.com/x")
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -220,7 +220,7 @@ func TestE2EExhaustionDeliversLastResponse(t *testing.T) {
 		_, _ = w.Write([]byte(fmt.Sprintf("attempt-%d", k)))
 	}, nil)
 
-	resp := env.get(t, "/http+status=500;*.attempts=2;*.initial=1ms;*.max=2ms;*.jitter=none/up.example.com/x")
+	resp := env.get(t, "/+status=500;*.attempts=2;*.initial=1ms;*.max=2ms;*.jitter=none/http/up.example.com/x")
 	if resp.StatusCode != 500 {
 		t.Fatalf("status = %d, want 500 (real upstream verdict)", resp.StatusCode)
 	}
@@ -260,7 +260,7 @@ func TestE2EPOSTBodyReplay(t *testing.T) {
 		_, _ = w.Write([]byte("echo:" + string(b)))
 	}, nil)
 
-	resp := env.doReq(t, "POST", "/http+status=500;*.attempts=2;*.initial=1ms;*.max=2ms;*.jitter=none/up.example.com/echo",
+	resp := env.doReq(t, "POST", "/+status=500;*.attempts=2;*.initial=1ms;*.max=2ms;*.jitter=none/http/up.example.com/echo",
 		strings.NewReader("hello world"), nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -302,7 +302,7 @@ func TestE2EPOSTOversizedDegraded(t *testing.T) {
 	}, cfg)
 
 	body := "0123456789abcdefghij" // 20 bytes > 16-byte cap
-	resp := env.doReq(t, "POST", "/http+status=500;*.attempts=3/up.example.com/upload",
+	resp := env.doReq(t, "POST", "/+status=500;*.attempts=3/http/up.example.com/upload",
 		strings.NewReader(body), nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200 (degraded single pass-through)", resp.StatusCode)
@@ -335,7 +335,7 @@ func TestE2EQueryBytePreservation(t *testing.T) {
 		w.WriteHeader(200)
 	}, nil)
 
-	resp := env.get(t, "/http+status=500;*.attempts=2/up.example.com/p?"+raw)
+	resp := env.get(t, "/+status=500;*.attempts=2/http/up.example.com/p?"+raw)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -506,7 +506,7 @@ func TestE2EUnknownRetryKey400(t *testing.T) {
 		w.WriteHeader(200)
 	}, nil)
 
-	resp := env.get(t, "/http+wat=1/up.example.com/x")
+	resp := env.get(t, "/+wat=1/http/up.example.com/x")
 	if resp.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
@@ -522,6 +522,52 @@ func TestE2EUnknownRetryKey400(t *testing.T) {
 	}
 }
 
+// TestE2EV03DeathShape400: the v0.3 weld spelling (/https+POLICY/host) over
+// real TCP dies as an unsupported scheme 400 quoting the raw segment — the
+// v0.3 grammar is dead, not special-cased.
+func TestE2EV03DeathShape400(t *testing.T) {
+	env := newE2EEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream must not be reached for a 400")
+		w.WriteHeader(200)
+	}, nil)
+
+	resp := env.get(t, "/https+status=5xx/up.example.com/x")
+	if resp.StatusCode != 400 {
+		t.Fatalf("status = %d, want 400 (v0.3 death shape)", resp.StatusCode)
+	}
+	var e struct {
+		Error string `json:"error"`
+		Hint  string `json:"hint"`
+	}
+	if err := json.Unmarshal([]byte(mustBody(t, resp)), &e); err != nil {
+		t.Fatalf("error body is not JSON: %v", err)
+	}
+	if !strings.Contains(e.Error, `unsupported scheme "https+status=5xx"`) {
+		t.Errorf("error = %q, want the unsupported-scheme 400 quoting the raw segment", e.Error)
+	}
+}
+
+// TestE2EPlusInTargetPathForwardedVerbatim: a "+" in the target path is
+// target data — the upstream receives it byte-for-byte over real TCP ("+" is
+// control only at segment position 1).
+func TestE2EPlusInTargetPathForwardedVerbatim(t *testing.T) {
+	var gotPath string
+	env := newE2EEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("ok"))
+	}, nil)
+
+	resp := env.get(t, "/http/up.example.com/+x/%2Ba")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	bodyString(t, resp)
+	if gotPath != "/+x/%2Ba" {
+		t.Errorf("upstream path = %q, want %q (byte-for-byte target data)", gotPath, "/+x/%2Ba")
+	}
+}
+
 // TestE2EDeadConfig400: 429.attempts without 429 in the status gate is
 // a dead configuration -> 400 (fail closed).
 func TestE2EDeadConfig400(t *testing.T) {
@@ -530,7 +576,7 @@ func TestE2EDeadConfig400(t *testing.T) {
 		w.WriteHeader(200)
 	}, nil)
 
-	resp := env.get(t, "/http+status=500;429.attempts=4/up.example.com/x")
+	resp := env.get(t, "/+status=500;429.attempts=4/http/up.example.com/x")
 	if resp.StatusCode != 400 {
 		t.Fatalf("status = %d, want 400", resp.StatusCode)
 	}
@@ -559,7 +605,7 @@ func TestE2EBudgetExhaustion(t *testing.T) {
 	}, nil)
 
 	start := time.Now()
-	resp := env.get(t, "/http+status=500;budget=100ms;*.attempts=10;*.initial=5s;*.max=10s;*.jitter=none/up.example.com/x")
+	resp := env.get(t, "/+status=500;budget=100ms;*.attempts=10;*.initial=5s;*.max=10s;*.jitter=none/http/up.example.com/x")
 	elapsed := time.Since(start)
 	defer bodyString(t, resp)
 
@@ -630,7 +676,7 @@ func TestE2EPlainRetryDotParamsReachUpstream(t *testing.T) {
 	}
 }
 
-// TestE2ESegmentPolicyPassthroughQueryUntouched: a segment policy with
+// TestE2ESegmentPolicyPassthroughQueryUntouched: a leading-segment policy with
 // passthrough query params — the target data stays in the query, retries on.
 func TestE2ESegmentPolicyPassthroughQueryUntouched(t *testing.T) {
 	var n int32
@@ -647,7 +693,7 @@ func TestE2ESegmentPolicyPassthroughQueryUntouched(t *testing.T) {
 		_, _ = w.Write([]byte("second works"))
 	}, nil)
 
-	resp := env.get(t, "/http+status=500;*.attempts=2;*.initial=1ms;*.max=2ms;*.jitter=none/up.example.com/x?target_param=yes")
+	resp := env.get(t, "/+status=500;*.attempts=2;*.initial=1ms;*.max=2ms;*.jitter=none/http/up.example.com/x?target_param=yes")
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -731,7 +777,7 @@ func TestE2EHeadersStrippedUpstream(t *testing.T) {
 	// Segment policy: the header channel is unused; the strip is exercised
 	// by ordinary traffic.
 	hdr3 := http.Header{}
-	resp3 := env.doReq(t, "GET", "/http+status=5xx/up.example.com/x", nil, hdr3)
+	resp3 := env.doReq(t, "GET", "/+status=5xx/http/up.example.com/x", nil, hdr3)
 	if resp3.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp3.StatusCode)
 	}
@@ -846,7 +892,7 @@ func TestE2EPlainHeaderPolicyBodyReplayE2E(t *testing.T) {
 	}
 }
 
-// TestE2EPolicyChannelConflictOverTCP: the conflict 400 (segment policy +
+// TestE2EPolicyChannelConflictOverTCP: the conflict 400 (leading-segment policy +
 // policy header) over a real listener. The plain form + header is the
 // intended header-channel combination, not a conflict.
 func TestE2EPolicyChannelConflictOverTCP(t *testing.T) {
@@ -858,14 +904,14 @@ func TestE2EPolicyChannelConflictOverTCP(t *testing.T) {
 	hdr := http.Header{}
 	hdr.Set(RetryPolicyHeader, "status=5xx")
 	for _, target := range []string{
-		"/http+status=500/up.example.com/x",
+		"/+status=500/http/up.example.com/x",
 	} {
 		resp := env.doReq(t, "GET", target, nil, hdr)
 		if resp.StatusCode != 400 {
 			t.Fatalf("%s: status = %d, want 400 (both channels used)", target, resp.StatusCode)
 		}
 		body := mustBody(t, resp)
-		for _, want := range []string{RetryPolicyHeader, "mutually exclusive", "scheme segment", "middleware or gateway"} {
+		for _, want := range []string{RetryPolicyHeader, "mutually exclusive", "leading policy segment", "middleware or gateway"} {
 			if !strings.Contains(body, want) {
 				t.Errorf("%s: 400 body %q should name %q", target, body, want)
 			}

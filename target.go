@@ -38,35 +38,40 @@ func (t PathTarget) URL() string {
 
 // usageHint is attached to errors caused by malformed or missing targets so
 // clients get the expected path shape in the error body. It names both
-// accepted scheme-segment shapes (plain, +POLICY).
-const usageHint = `expected path "/SCHEME[+POLICY]/AUTHORITY[/PATH]" with SCHEME http or https and POLICY a retry policy like "status=5xx;*.attempts=3", e.g. "/https/api.example.com/v1/chat" or "/https+status=5xx/api.example.com/v1/chat"; the policy may also be sent in the X-Reproxy-Retry-Policy header`
+// accepted shapes (plain, leading +POLICY).
+const usageHint = `expected path "[/+POLICY]/SCHEME/AUTHORITY[/PATH]" with SCHEME http or https and POLICY a retry policy like "status=5xx;*.attempts=3", e.g. "/https/api.example.com/v1/chat" or "/+status=5xx;*.attempts=3/https/api.example.com/v1/chat"; the policy may also be sent in the X-Reproxy-Retry-Policy header`
 
-// ParsePath parses a proxy target and its optional scheme-segment retry
+// ParsePath parses a proxy target and its optional leading-segment retry
 // policy from the escaped request path (use r.URL.EscapedPath() so RAW-PATH
 // bytes are preserved verbatim).
 //
 // Grammar:
 //
-//	PROXY-TARGET := "/" SCHEME-SEGMENT "/" AUTHORITY [ "/" RAW-PATH ]
-//	SCHEME-SEGMENT := SCHEME [ "+" POLICY ]
+//	PROXY-TARGET := [ "/" "+" POLICY ] "/" SCHEME "/" AUTHORITY [ "/" RAW-PATH ]
 //
-// SCHEME is "http" or "https" (case-insensitive, lowercased). POLICY is the
-// retry policy pair grammar ("key=value" pairs, ";";-separated, dotted scope
-// keys — see parsePolicyPairList); it is parsed into url.Values here and
-// resolved by policy.Parse in the caller. A nil params return means "no
+// The leading "/+"POLICY segment, when present, is a control token: reproxy's
+// own surface. It is parsed first, with the shared pair grammar
+// (parsePolicyPairList, segmentCarrier) on ORIGINAL bytes. SCHEME is then
+// "http" or "https" (case-insensitive, lowercased) — a pure target that
+// reports only the destination protocol. A nil params return means "no
 // policy" — the only such spelling.
 //
-// The scheme segment is matched against the original escaped bytes: "%2B"
-// is not "+" (no normalization re-interprets encoded characters as syntax),
-// so "/https%2Bstatus=5xx/host" fails scheme validation as the literal
-// segment "https%2Bstatus=5xx". The scheme part is case-insensitive; the
-// policy body after the "+" is matched on original bytes and never
-// lowercased.
+// The leading-segment dispatch is a single byte check at position 1, matched
+// on the ORIGINAL escaped bytes: "%2B" is not "+" (no normalization
+// re-interprets encoded characters as syntax), so "/%2Bstatus=5xx/https/host"
+// fails scheme validation as the literal segment "%2Bstatus=5xx". The scheme
+// part is case-insensitive; the policy body after the "/+" is matched on
+// original bytes and never lowercased. A "+" anywhere else — including the
+// scheme segment ("/https+status=5xx/host", the v0.3 spelling) or the target
+// path ("/https/host/+x") — is ordinary path data: the former dies as an
+// unsupported scheme, the latter is forwarded verbatim.
 //
-// SECOND-SYSTEM GUARDRAIL: the "+" slot speaks ONLY retry policy. Nothing
-// else may ever live there — no transport selectors, no feature flags, no
-// additional namespaces. A future extension belongs in a new header or a
-// new surface, not in this slot.
+// SECOND-SYSTEM GUARDRAIL: the leading "+" segment speaks ONLY retry policy;
+// the scheme segment is pure target. v0.3 welded policy onto the scheme
+// token; that grammar died in v0.4 as an unsupported scheme. Nothing else may
+// ever live in the "+" slot — no transport selectors, no feature flags, no
+// additional namespaces. A future extension belongs in a new header or a new
+// surface, not in this slot.
 //
 // Parsing is strict by design (SSRF layer L1): unknown schemes, malformed
 // policies, userinfo, bracket-less IPv6, out-of-range or leading-zero
@@ -82,6 +87,40 @@ func ParsePath(escapedPath string) (PathTarget, url.Values, *RequestError) {
 	}
 	rest := strings.TrimPrefix(escapedPath, "/")
 
+	// Leading control segment: "/+POLICY". One byte check at position 1 —
+	// the same one-mechanism class as the rest of the grammar, one cut, no
+	// lookahead. Absent means no policy from the path (nil params).
+	var policyParams url.Values
+	var pendingPolicy string
+	if strings.HasPrefix(rest, "+") {
+		var policySeg string
+		if i := strings.Index(rest, "/"); i >= 0 {
+			policySeg, rest = rest[1:i], rest[i+1:]
+		} else {
+			policySeg, rest = rest[1:], ""
+		}
+		if strings.TrimSpace(policySeg) == "" {
+			// "/+" and "/+/https/h": the control segment is present but
+			// empty (or whitespace-only) — degenerate, and absent is the only
+			// no-policy spelling. The shared ladder's empty-body 400 fires
+			// here (it always errors for an empty body, so the call is an
+			// error-or-impossible form).
+			if _, rerr := parsePolicyPairList(policySeg, segmentCarrier); rerr != nil {
+				return PathTarget{}, nil, rerr
+			}
+		}
+		if rest == "" {
+			// "/+status=5xx" and nothing after it: the control segment
+			// consumed the path, so the scheme never follows.
+			return PathTarget{}, nil, &RequestError{
+				Code:   400,
+				Reason: "missing upstream scheme in path",
+				Hint:   usageHint,
+			}
+		}
+		pendingPolicy = policySeg
+	}
+
 	// Split off the scheme segment (first path segment before the next "/").
 	var schemeSeg, remainder string
 	if i := strings.Index(rest, "/"); i >= 0 {
@@ -89,9 +128,24 @@ func ParsePath(escapedPath string) (PathTarget, url.Values, *RequestError) {
 	} else {
 		schemeSeg, remainder = rest, ""
 	}
-	scheme, policyParams, rerr := parseSchemeSegment(schemeSeg)
+	scheme, rerr := parseSchemeSegment(schemeSeg)
 	if rerr != nil {
 		return PathTarget{}, nil, rerr
+	}
+
+	// The scheme survived its strict table: now the control segment's body
+	// gets the shared pair grammar. Every degenerate form (empty pair,
+	// whitespace-only, missing "=", empty key) is a 400 from the shared
+	// fail-closed ladder; any bare word is the generic unknown-field 400.
+	// This ordering keeps the inherited ladder precedence — scheme errors
+	// name the scheme before policy errors name the field — so a second
+	// "+"-shaped segment dies as an unsupported scheme, not a policy 400.
+	if pendingPolicy != "" {
+		params, rerr := parsePolicyPairList(pendingPolicy, segmentCarrier)
+		if rerr != nil {
+			return PathTarget{}, nil, rerr
+		}
+		policyParams = params
 	}
 
 	// Split off the authority (segment between scheme and raw path).
@@ -120,53 +174,36 @@ func ParsePath(escapedPath string) (PathTarget, url.Values, *RequestError) {
 	return PathTarget{Scheme: scheme, Host: host, Port: port, RawPath: rawPath}, policyParams, nil
 }
 
-// parseSchemeSegment validates the first path segment against the strict
-// table {plain, +POLICY} × {http, https}. The scheme part is case-insensitive
-// (lowercased); a policy present after the "+" is parsed with the shared pair
-// grammar on ORIGINAL bytes (never lowercased). Returns the scheme and the
-// parsed policy params (nil when the plain form carries no policy).
+// parseSchemeSegment validates the scheme segment against the strict table
+// {http, https} — a PURE target: the segment reports only the destination
+// protocol, nothing else. The scheme is case-insensitive (lowercased). There
+// is no "+" logic here: a "+" in the segment (the v0.3 weld spelling
+// "https+status=5xx", the bare control word "+", anything else) simply fails
+// the strict table and dies as an unsupported scheme quoting the raw segment
+// (no legacy detection — the v0.3 grammar is dead, not special-cased).
 //
-// Anything else — an unknown scheme, a bare "+", a policy with unknown
-// fields — is a 400 whose reason names the actual malformed segment (so a
-// typo reads as an unsupported scheme naming the input) or the unknown
-// policy field, and whose hint carries the usage hint.
-func parseSchemeSegment(segment string) (scheme string, policyParams url.Values, rerr *RequestError) {
-	// The "+" separator is matched on the ORIGINAL segment bytes: "%2B" is
-	// not "+". The scheme part before it is case-insensitive; the policy
-	// body after it is not.
-	schemePart, policyPart, hasPlus := strings.Cut(segment, "+")
-
-	lower := strings.ToLower(schemePart)
+// Anything else — an unknown scheme — is a 400 whose reason names the actual
+// malformed segment (so a typo reads as an unsupported scheme naming the
+// input) and whose hint carries the usage hint.
+func parseSchemeSegment(segment string) (scheme string, rerr *RequestError) {
+	lower := strings.ToLower(segment)
 	if lower != "http" && lower != "https" {
 		if segment == "" {
-			// "//host/..." — the path's first segment is empty, which the
-			// caller reports as a missing target.
-			return "", nil, &RequestError{
+			// "//host/..." (or "/+P/" with nothing after it) — the segment
+			// is empty, which the caller reports as a missing target.
+			return "", &RequestError{
 				Code:   400,
 				Reason: "missing upstream target in path",
 				Hint:   usageHint,
 			}
 		}
-		return "", nil, &RequestError{
+		return "", &RequestError{
 			Code:   400,
-			Reason: fmt.Sprintf("unsupported scheme %q: only http and https are supported, optionally with a + retry policy", segment),
+			Reason: fmt.Sprintf("unsupported scheme %q: only http and https are supported", segment),
 			Hint:   usageHint,
 		}
 	}
-	if !hasPlus {
-		// Plain form: no policy. The query is target-owned, one attempt —
-		// unless the header channel supplies a policy.
-		return lower, nil, nil
-	}
-	// "+POLICY" present: parse it with the shared pair grammar. Every
-	// degenerate form (bare "+", empty pair, whitespace-only, missing "=",
-	// empty key) is a 400 from the shared fail-closed ladder; any bare word
-	// is the generic unknown-field 400.
-	params, rerr := parsePolicyPairList(policyPart, segmentCarrier)
-	if rerr != nil {
-		return "", nil, rerr
-	}
-	return lower, params, nil
+	return lower, nil
 }
 
 // parseAuthority splits and validates the authority: host plus optional port.

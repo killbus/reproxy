@@ -116,7 +116,7 @@ func (p Policy) RetryableStatus(status int) bool {
 }
 
 // Parse builds a Policy from the retry-namespace url.Values produced by the
-// policy carriers (the scheme segment and the policy header both transform
+// policy carriers (the leading policy segment and the policy header both transform
 // into this shape).
 //
 // Resolution is a three-tier chain with field-level override:
