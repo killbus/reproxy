@@ -1,0 +1,1 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Check agent verifies the relocation is pure (diff-level), .gitattributes line present, workflow shrunk to orchestration only"}

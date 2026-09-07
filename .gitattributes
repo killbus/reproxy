@@ -22,3 +22,8 @@ Dockerfile text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
 .dockerignore text eol=lf
+
+# Shell scripts check out as LF like the Dockerfile/*.go rules above:
+# Git Bash chokes on CRLF shebangs, and a Windows checkout with autocrlf
+# would otherwise make scripts/ unusable.
+*.sh text eol=lf

@@ -21,6 +21,8 @@ reproxy/
 ├── *_test.go             # colocated unit tests, one per source file
 ├── e2e_test.go           # real-TCP end-to-end scenarios (no mocks above network layer)
 ├── cmd/reproxy/main.go   # the only binary entrypoint
+├── scripts/              # repo-owned verification/infra scripts (not Go, not product code)
+│   └── docker-smoke.sh   # the three image smoke checks (version banner, round-trip + gate, compose)
 └── docs/adr/             # architecture decision records
 ```
 
@@ -30,4 +32,5 @@ reproxy/
 - **One concern per file, named for the PRD requirement it implements.** `policy.go` is R3; `ssrf.go` is R7. A new requirement gets a new file, not an annex to an existing one.
 - **Tests colocated**: `policy.go` ↔ `policy_test.go`. Cross-file integration scenarios go in `e2e_test.go`.
 - **No `util.go` / `helpers.go`** — a file that needs such a name has no concern; name it after what it does (see `backoff.go`).
+- **`scripts/` is verification/infra, not product code.** Shell scripts there (e.g. `docker-smoke.sh`) pin product contracts that CI and local builds both run — the repo, not a CI template, owns them (the "same build path" principle applied to verification). The stdlib-only rule is a Go-product constraint; shell is the same category as workflow YAML. New scripts: LF-only (`.gitattributes`), executable bit set in the index, no knobs — hardcoded ports/paths with the reasoning in comments.
 - Stdlib only (ADR-0001). Adding an external dependency requires an ADR-level justification, not a casual import.

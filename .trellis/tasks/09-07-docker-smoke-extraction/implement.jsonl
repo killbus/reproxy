@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Pure-relocation discipline (R7-8): the smoke checks move byte-level, no redesign; mutation evidence standards apply to the relocation"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "scripts/ is a new top-level entry under the flat layout; the script's place in the repo contract"}

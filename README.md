@@ -75,7 +75,14 @@ docker run --rm -p 8080:8080 reproxy:local --allowlist example.com
 ```
 
 The local image reports `--version` as `dev`; inject a version with
-`--build-arg VERSION=vX.Y.Z`. The compose local-build variant replaces
+`--build-arg VERSION=vX.Y.Z`. Verify a local build the same way CI does
+(no VERSION build-arg means the banner reports `dev`):
+
+```sh
+docker build -t reproxy:local . && scripts/docker-smoke.sh reproxy:local dev
+```
+
+The compose local-build variant replaces
 `image:` with `build: .`:
 
 ```yaml

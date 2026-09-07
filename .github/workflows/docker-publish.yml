@@ -92,146 +92,19 @@ jobs:
 
       # ---- Smoke tests: the pinned failure mode. The image's version must
       # not lie, and the binary must actually proxy. Push happens only after
-      # all of them pass. ----
+      # the smoke script passes. The checks live in scripts/docker-smoke.sh
+      # (the repo, not a CI template, owns the product contracts); this
+      # step is only their CI caller. ----
 
-      - name: Smoke - version banner matches expected version
+      - name: Smoke - version banner, round-trip, compose (scripts/docker-smoke.sh)
         env:
+          # Env, never template interpolation into the shell line: a tag
+          # name with shell metacharacters must never become code.
           SMOKE_IMAGE: ${{ steps.meta.outputs.tags }}
           EXPECTED_VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          # EXPECTED_VERSION flows through env, not template interpolation
-          # into the shell line: a tag name with shell metacharacters must
-          # never become code.
-          expected="${EXPECTED_VERSION}"
           first_tag="$(echo "${SMOKE_IMAGE}" | head -n1)"
-          echo "running: ${first_tag} --version"
-          actual="$(docker run --rm "${first_tag}" --version)"
-          echo "expected: ${expected}"
-          echo "actual:   ${actual}"
-          if [[ "${actual}" != "${expected}" ]]; then
-            echo "::error::image version '${actual}' does not match expected '${expected}'"
-            exit 1
-          fi
-
-      - name: Smoke - request round-trip through the proxy
-        env:
-          SMOKE_IMAGE: ${{ steps.meta.outputs.tags }}
-        run: |
-          # The upstream must be a real PUBLIC https host: SSRF layer L3
-          # (ssrf.go forbiddenIPv4Prefixes) unconditionally refuses
-          # loopback/RFC1918/link-local targets — --allowlist gates L2 only,
-          # and --dangerous-allow-all keeps the forbidden-IP list. A local
-          # test upstream is therefore impossible by design (the product's
-          # own no-SSRF guarantee); example.com is the stable public stand-in.
-          # The https handshake also exercises the distroless CA roots in the
-          # same request — a scratch image would fail exactly here.
-          first_tag="$(echo "${SMOKE_IMAGE}" | head -n1)"
-
-          docker run --rm --detach --name reproxy-smoke \
-            -p 18080:8080 \
-            "${first_tag}" \
-            --allowlist example.com
-          trap 'docker rm -f reproxy-smoke >/dev/null 2>&1 || true' EXIT
-
-          # Wait for the proxy to accept connections (bounded retries; the
-          # if-condition context shields failed probes from the default
-          # bash -e so the loop can retry).
-          ready=""
-          for _ in $(seq 1 30); do
-            if curl -s -o /dev/null --max-time 2 http://127.0.0.1:18080/; then
-              ready=1
-              break
-            fi
-            sleep 1
-          done
-          if [[ -z "${ready}" ]]; then
-            echo "::error::proxy did not become ready on 127.0.0.1:18080"
-            docker logs reproxy-smoke || true
-            exit 1
-          fi
-
-          # One real request THROUGH the proxy to the public upstream.
-          status="$(curl -s -o /tmp/body.html -w '%{http_code}' --max-time 30 \
-            'http://127.0.0.1:18080/https/example.com/')"
-          echo "proxied status: ${status}"
-          if [[ "${status}" != "200" ]]; then
-            echo "::error::round-trip through the proxy returned ${status}, want 200"
-            docker logs reproxy-smoke || true
-            exit 1
-          fi
-          if ! grep -q "Example Domain" /tmp/body.html; then
-            echo "::error::round-trip body does not contain the expected upstream marker"
-            exit 1
-          fi
-          echo "round-trip OK: 200 + upstream body marker verified"
-
-          # Allowlist gate check (deterministic — no external dependency):
-          # a host NOT in --allowlist must 403 naming the allowlist, before
-          # any DNS work (product guarantee L2).
-          gated="$(curl -s -o /tmp/gated.json -w '%{http_code}' --max-time 5 \
-            'http://127.0.0.1:18080/https/other.example.org/')"
-          echo "gated request status: ${gated}"
-          if [[ "${gated}" != "403" ]]; then
-            echo "::error::non-allowlisted host was not refused (got ${gated})"
-            exit 1
-          fi
-          if ! grep -q "not in the allowlist" /tmp/gated.json; then
-            echo "::error::403 body does not name the allowlist gate"
-            exit 1
-          fi
-
-      - name: Smoke - compose file (local-build variant) starts a serving proxy
-        run: |
-          # The committed docker-compose.yml pins the published image; the
-          # PRD's local-build variant replaces image: with build:. Exercise
-          # exactly that variant here: build from the checkout, up, one
-          # gated request (deterministic 403 through the L2 gate), down.
-          # The rewritten file is written NEXT TO the checkout (not /tmp):
-          # docker compose resolves relative paths (build: .) against the
-          # first -f file's directory, so a /tmp copy would look for
-          # /tmp/Dockerfile and fail.
-          sed -E 's|^([[:space:]]*)image:[[:space:]]*ghcr\.io/killbus/reproxy:v[0-9.]+.*$|\1build: .|' \
-            docker-compose.yml > docker-compose.local.yml
-          if ! grep -q "build: \." docker-compose.local.yml; then
-            echo "::error::local-build rewrite of docker-compose.yml failed"
-            cat docker-compose.local.yml
-            exit 1
-          fi
-
-          docker compose -f docker-compose.local.yml up -d --build
-          trap 'docker compose -f docker-compose.local.yml down -v >/dev/null 2>&1 || true; rm -f docker-compose.local.yml' EXIT
-
-          # Wait for the compose service to accept connections. The compose
-          # file maps 8080:8080 (not the 18080 the round-trip smoke above
-          # used — that container is gone via its EXIT trap; this step
-          # probes the compose-published port).
-          ready=""
-          for _ in $(seq 1 30); do
-            if curl -s -o /dev/null --max-time 2 http://127.0.0.1:8080/; then
-              ready=1
-              break
-            fi
-            sleep 1
-          done
-          if [[ -z "${ready}" ]]; then
-            echo "::error::compose service did not become ready"
-            docker compose -f docker-compose.local.yml logs || true
-            exit 1
-          fi
-
-          # A request to a host outside the allowlist (api.example.com is
-          # the only allowlisted entry) must 403 — deterministic, no
-          # network dependency; proves the compose service is OUR proxy
-          # and the gate is in force.
-          gated="$(curl -s -o /tmp/compose-gated.json -w '%{http_code}' --max-time 5 \
-            'http://127.0.0.1:8080/https/example.com/')"
-          echo "compose gated request status: ${gated}"
-          if [[ "${gated}" != "403" ]]; then
-            echo "::error::compose service did not gate an un-allowlisted host (got ${gated})"
-            docker compose -f docker-compose.local.yml logs || true
-            exit 1
-          fi
-          echo "compose OK: service up, gated 403 verified"
+          scripts/docker-smoke.sh "${first_tag}" "${EXPECTED_VERSION}"
 
       - name: Push image
         uses: docker/build-push-action@v7.3.0
