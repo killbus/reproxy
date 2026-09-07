@@ -129,3 +129,25 @@ Chatroom round 7 (5/5) adjudicated the owner's two challenges. A (policy-in-sche
 ### Status
 
 [OK] **Completed**
+
+
+## Session 5: v0.4.0: leading +POLICY segment — scheme returns to pure target
+<!-- trellis-session: v=2 fp=f5c0d30a3e270a5f -->
+
+**Date**: 2026-09-07
+**Task**: v0.4.0: leading +POLICY segment — scheme returns to pure target
+**Branch**: `main`
+
+### Summary
+
+Executed the R8 convergence end-to-end. Implement agent (6 units, incremental persistence): leading + dispatch at byte 1 in ParsePath, parseSchemeSegment stripped to strict {http,https} (v0.3 spellings die as unsupported scheme, the v0.2 knife a third time, no legacy detection), carrierSegment renamed to 'leading policy segment', conflict 400 reworded, 405 tests (396→405), README+spec full rewrite, compose/README pins v0.4.0. One declared deviation: policy-body validation ordered after the scheme check (inherited ladder precedence — scheme errors name the scheme first). Check agent (resumed once after a 600s stall at mini-mutation 1, zero loss — transcript recovery + incremental report): READY-FOR-TAG, zero defects. Notables: (B) pure-form byte-stability proven by stashing to the v0.3 tree — 174 vs 177 top-level passes, zero regressions, only 3 additions; (C) mutation re-verification 4/4 in an isolated copy with every cut compiled and revert cmp-verified, m10 capture count matched the implement agent exactly; (G) the empty-segment error-or-impossible construct live-probed with 10 edge inputs — no fall-through. Committed 51da285, tagged v0.4.0, pushed. CI green both OS + Linux race; docker-publish green on the tag path — FIRST IMAGE SHIPPED: ghcr.io/killbus/reproxy:v0.4.0 + :latest, version banner v0.4.0 exact match through the extracted scripts/docker-smoke.sh (R8-3 ordering held: extraction landed and dispatch-verified before this tag), both manifests anonymous-200. GitHub Release created. Earlier this session: smoke extraction task archived (6284f20 + dispatch run 34126011952 green).
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `51da285` | feat(grammar)!: policy moves to a leading segment — the scheme segment is pure target |
+
+### Status
+
+[OK] **Completed**
