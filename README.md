@@ -18,7 +18,7 @@ go build ./cmd/reproxy        # produces ./reproxy
 ```
 
 ```sh
-curl "http://localhost:8080/+status=500,502-504;*.attempts=3/https/example.com/api"
+curl "http://localhost:8080/+status=500,502-504;attempts=3/https/example.com/api"
 ```
 
 A binary built this way reports `--version` as `dev`; release builds are
@@ -168,24 +168,26 @@ whitespace around pairs and around the `=`. Two carriers accept the same
 grammar:
 
 ```
-/+status=5xx;*.attempts=3;429.attempts=5/https/host/path?query   (leading path segment)
-X-Reproxy-Retry-Policy: status=5xx; [*].attempts=3; [429].attempts=5   (header)
+/+status=5xx;attempts=3;429.attempts=5/https/host/path?query   (leading path segment)
+X-Reproxy-Retry-Policy: status=5xx; attempts=3; [429].attempts=5   (header)
 ```
 
 - **Leading path segment** — the policy rides the leading `/+`-prefixed
-  segment. Scope keys are dotted (`*.attempts`, `429.attempts`) because
-  brackets are illegal in a path segment; gates are bare words (`status`,
-  `network`, `budget`).
+  segment. Status-code scopes are dotted (`429.attempts`) because brackets
+  are illegal in a path segment; gates and global scope fields are bare
+  words (`status`, `attempts`).
 - **Header** — `X-Reproxy-Retry-Policy` carries the same policy with bracketed
-  scope spellings (`[*].attempts`, `[429].attempts`), which are legal in a
-  header value. See [the header channel](#the-header-channel-x-reproxy-retry-policy).
+  status-code scopes (`[429].attempts`), which are legal in a header value.
+  See [the header channel](#the-header-channel-x-reproxy-retry-policy).
 
 The two carriers map onto the same field set and feed the same validation, so
 every check — unknown keys, bad values, dead configurations — produces the
-same 400 bodies either way. A key that is neither a gate nor a dotted scope
-(`*.FIELD` with FIELD known, `NNN.FIELD` with NNN a 3-digit code) is rejected
-as an unknown policy field; there is no other `+` vocabulary and no
-identifier slot.
+same 400 bodies either way. A key that is neither a gate, a bare scope field,
+nor a dotted status-code scope (`FIELD` known, `NNN.FIELD` with NNN a
+3-digit code) is rejected as an unknown policy field; there is no other `+`
+vocabulary and no identifier slot. The global scope has no spelling of its
+own — a bare field IS global (`attempts=3`), and the `*.` / `[*].`
+spellings are dead (a 400).
 
 The two carriers are **mutually exclusive**: a policy in the leading path
 segment plus the header is a 400 naming both channels and the remedy. The
@@ -221,10 +223,11 @@ For programmatic clients that can set headers, the policy can travel
 out-of-band, leaving the path plain:
 
 ```
-X-Reproxy-Retry-Policy: status=5xx; network=1; budget=30s; [*].attempts=3; [429].attempts=5
+X-Reproxy-Retry-Policy: status=5xx; network=1; budget=30s; attempts=3; [429].attempts=5
 ```
 
-- The value uses the shared pair grammar with bracketed scope spellings.
+- The value uses the shared pair grammar with bracketed status-code scopes;
+  the global scope is a bare field (`attempts=3`).
   Keys are case-sensitive; values are taken literally (never URL-decoded —
   header values are plain text). No legitimate value needs `;` or `=`, so
   the pair split stays unambiguous.
@@ -250,16 +253,16 @@ X-Reproxy-Retry-Policy: status=5xx; network=1; budget=30s; [*].attempts=3; [429]
 | `status` | global | Which upstream statuses trigger a retry (the gate) | empty (no status retries) | exact codes, closed ranges, or class shorthand — see below |
 | `network` | global | Retry network failures (dial/TLS/write/TTFB timeout) | `1` | `0` or `1` |
 | `budget` | global | Hard cap on the total retry lifecycle (all attempts + waits) | `30s` | duration with unit, > 0 |
-| `*.attempts` | default scope | Total attempts including the first | `3` | integer ≥ 1 |
-| `*.backoff` | default scope | Wait curve: `constant` \| `linear` \| `exponential` | `exponential` | one of the three |
-| `*.initial` | default scope | Base wait | `1s` | duration with unit, > 0 |
-| `*.max` | default scope | Cap on a single computed wait | `8s` | duration with unit, ≥ `*.initial` |
-| `*.jitter` | default scope | `none` \| `full` \| `equal` | `full` | one of the three |
-| `*.retry_after` | default scope | `honor` \| `ignore` upstream `Retry-After` | `honor` | one of the two |
+| `attempts` | global | Total attempts including the first | `3` | integer ≥ 1 |
+| `backoff` | global | Wait curve: `constant` \| `linear` \| `exponential` | `exponential` | one of the three |
+| `initial` | global | Base wait | `1s` | duration with unit, > 0 |
+| `max` | global | Cap on a single computed wait | `8s` | duration with unit, ≥ `initial` |
+| `jitter` | global | `none` \| `full` \| `equal` | `full` | one of the three |
+| `retry_after` | global | `honor` \| `ignore` upstream `Retry-After` | `honor` | one of the two |
 | `NNN.<field>` | per-status | Override any field above **for retries triggered by status NNN** | — | `NNN` is an exact 3-digit code, 100–599 |
 
-In the header carrier the scope spellings are bracketed: `[*].attempts`,
-`[429].attempts`.
+In the header carrier the per-status scopes are bracketed: `429.attempts`
+becomes `[429].attempts`; the global fields stay bare.
 
 `status` accepts a comma-separated list of exact codes (`429,500`), closed
 ranges (`500-599`), and class shorthand (`5xx`, `5XX`). Overlaps and
@@ -273,11 +276,11 @@ Durations require a unit (`1s`, `100ms`, `1.5s`); a bare number is a 400.
 Fields resolve through a three-tier chain with field-level override:
 
 ```
-built-in default  ->  *.FIELD  ->  NNN.FIELD
+built-in default  ->  FIELD  ->  NNN.FIELD
 ```
 
 Each tier overrides only the fields it names. `429.initial=100ms` changes the
-wait for 429-triggered retries only; every other field keeps the `*` (or
+wait for 429-triggered retries only; every other field keeps the bare (or
 built-in) value.
 
 Gates and budget live only at the global level — `429.status` or
@@ -459,7 +462,7 @@ down gracefully on SIGINT/SIGTERM, draining in-flight requests for up to 10s.
 Client-visible errors use a JSON body:
 
 ```json
-{"error": "unknown policy field \"wat\"", "hint": "policy keys are status, network, budget, *.FIELD, or NNN.FIELD ..."}
+{"error": "unknown policy field \"wat\"", "hint": "policy keys are status, network, budget, FIELD (a global scope field like attempts), or NNN.FIELD ..."}
 ```
 
 | Status | When |

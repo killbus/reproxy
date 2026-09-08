@@ -39,7 +39,7 @@ func (t PathTarget) URL() string {
 // usageHint is attached to errors caused by malformed or missing targets so
 // clients get the expected path shape in the error body. It names both
 // accepted shapes (plain, leading +POLICY).
-const usageHint = `expected path "[/+POLICY]/SCHEME/AUTHORITY[/PATH]" with SCHEME http or https and POLICY a retry policy like "status=5xx;*.attempts=3", e.g. "/https/api.example.com/v1/chat" or "/+status=5xx;*.attempts=3/https/api.example.com/v1/chat"; the policy may also be sent in the X-Reproxy-Retry-Policy header`
+const usageHint = `expected path "[/+POLICY]/SCHEME/AUTHORITY[/PATH]" with SCHEME http or https and POLICY a retry policy like "status=5xx;attempts=3", e.g. "/https/api.example.com/v1/chat" or "/+status=5xx;attempts=3/https/api.example.com/v1/chat"; the policy may also be sent in the X-Reproxy-Retry-Policy header`
 
 // ParsePath parses a proxy target and its optional leading-segment retry
 // policy from the escaped request path (use r.URL.EscapedPath() so RAW-PATH

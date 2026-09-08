@@ -26,7 +26,7 @@ func TestHeaderPairGrammar(t *testing.T) {
 		value string
 		want  map[string]string
 	}{
-		{"full policy from design", "status=5xx; network=1; budget=30s; [*].attempts=3; [429].attempts=5", map[string]string{
+		{"full policy from design", "status=5xx; network=1; budget=30s; attempts=3; [429].attempts=5", map[string]string{
 			"retry.status":        "5xx",
 			"retry.network":       "1",
 			"retry.budget":        "30s",
@@ -35,13 +35,13 @@ func TestHeaderPairGrammar(t *testing.T) {
 		}},
 		{"single gate", "status=429", map[string]string{"retry.status": "429"}},
 		{"scope only", "[429].attempts=2", map[string]string{"retry[429].attempts": "2"}},
-		{"default scope only", "[*].initial=100ms", map[string]string{"retry[*].initial": "100ms"}},
+		{"default scope only", "initial=100ms", map[string]string{"retry[*].initial": "100ms"}},
 		{"whitespace around pairs", "  status=429  ;  network=0  ", map[string]string{"retry.status": "429", "retry.network": "0"}},
 		{"whitespace before separator is pair whitespace", "status=429 ; network=0", map[string]string{"retry.status": "429", "retry.network": "0"}},
 		{"whitespace around the equals sign", "status = 429; network = 0", map[string]string{"retry.status": "429", "retry.network": "0"}},
 		{"no whitespace at all", "status=429;network=0;budget=10s", map[string]string{"retry.status": "429", "retry.network": "0", "retry.budget": "10s"}},
 		{"value with comma is fine", "status=429,500-599", map[string]string{"retry.status": "429,500-599"}},
-		{"jitter and retry_after scope fields", "[*].jitter=equal; [429].retry_after=ignore", map[string]string{
+		{"jitter and retry_after scope fields", "jitter=equal; [429].retry_after=ignore", map[string]string{
 			"retry[*].jitter":        "equal",
 			"retry[429].retry_after": "ignore",
 		}},
@@ -68,7 +68,7 @@ func TestHeaderPairGrammar(t *testing.T) {
 // TestHeaderScopeKeysNeverDoubleDot: scope keys map to "retry[*].x", never
 // "retry.[*].x" — the header carrier's prefixing rule (queryKeyForHeaderKey).
 func TestHeaderScopeKeysNeverDoubleDot(t *testing.T) {
-	got, err := ParseRetryPolicyHeader(headerFor(RetryPolicyHeader, "[*].attempts=2; [429].max=4s"))
+	got, err := ParseRetryPolicyHeader(headerFor(RetryPolicyHeader, "attempts=2; [429].max=4s"))
 	if err != nil {
 		t.Fatalf("ParseRetryPolicyHeader error: %v", err)
 	}
@@ -180,6 +180,18 @@ func TestHeaderDegenerateInputRejected(t *testing.T) {
 			"value containing equals among valid",
 			headerFor(RetryPolicyHeader, "status=5xx; budget=1s=2s"),
 			"contains \"=\"",
+		},
+		// Dead global spelling: [*].FIELD has no referent — a bare field IS
+		// global (v0.5.0, the fifth breaking change).
+		{
+			"dead star scope spelling",
+			headerFor(RetryPolicyHeader, "[*].attempts=2"),
+			"unknown policy field",
+		},
+		{
+			"dead star scope among valid",
+			headerFor(RetryPolicyHeader, "status=5xx; [*].initial=1ms"),
+			"unknown policy field",
 		},
 	}
 	for _, tt := range tests {
@@ -300,8 +312,8 @@ func TestHeaderLegitimateValuesRepresentable(t *testing.T) {
 // segment (ParsePath) and via the header (ParseRetryPolicyHeader) resolves to
 // deep-equal Policies — one grammar, two carriers, a pure channel swap.
 func TestHeaderTransformEquivalence(t *testing.T) {
-	segmentPath := "/+status=429,5xx;network=1;budget=30s;*.attempts=3;*.backoff=linear;429.attempts=5/https/h"
-	headerVal := "status=429,5xx; network=1; budget=30s; [*].attempts=3; [*].backoff=linear; [429].attempts=5"
+	segmentPath := "/+status=429,5xx;network=1;budget=30s;attempts=3;backoff=linear;429.attempts=5/https/h"
+	headerVal := "status=429,5xx; network=1; budget=30s; attempts=3; backoff=linear; [429].attempts=5"
 
 	_, viaSegment, rerr := ParsePath(segmentPath)
 	if rerr != nil {
@@ -338,18 +350,18 @@ func TestHeaderParseErrorMatrix(t *testing.T) {
 		wantMsg string
 	}{
 		{"unknown gate", "attempt=3", "unknown retry parameter"},
-		{"unknown scope field", "[*].bogus=1", "unknown retry parameter"},
+		{"unknown scope field", "bogus=1", "unknown retry parameter"},
 		{"gate inside scope", "[429].status=5xx", "unknown retry parameter"},
-		{"bad attempts", "[*].attempts=abc", "invalid value"},
-		{"attempts zero", "[*].attempts=0", "invalid value"},
-		{"bad backoff", "[*].backoff=fast", "invalid value"},
-		{"bad duration", "[*].initial=100", "invalid value"},
+		{"bad attempts", "attempts=abc", "invalid value"},
+		{"attempts zero", "attempts=0", "invalid value"},
+		{"bad backoff", "backoff=fast", "invalid value"},
+		{"bad duration", "initial=100", "invalid value"},
 		{"bad budget", "budget=10", "invalid value"},
 		{"bad network value", "network=yes", "invalid value"},
 		{"bad status list", "status=abc", "invalid status code"},
 		{"empty status item", "status=429,,500", "empty item"},
 		{"dead config", "status=429; [500].attempts=2", "dead retry configuration"},
-		{"max below initial", "[*].initial=4s; [*].max=1s", "max (1s) is smaller than initial (4s)"},
+		{"max below initial", "initial=4s; max=1s", "max (1s) is smaller than initial (4s)"},
 		// A non-3-digit scope is NOT splitScopeKey's exact-status shape, so
 		// Parse's default branch reports it as an unknown parameter — that
 		// IS Parse's verdict for this spelling (identical to the query
@@ -381,7 +393,7 @@ func TestHeaderParseErrorMatrix(t *testing.T) {
 // resolved fields, complementing the deep-equal test above with different
 // input).
 func TestHeaderParseRoundTrip(t *testing.T) {
-	viaHeader, rerr := ParseRetryPolicyHeader(headerFor(RetryPolicyHeader, "status=429; [*].attempts=4; [429].attempts=2"))
+	viaHeader, rerr := ParseRetryPolicyHeader(headerFor(RetryPolicyHeader, "status=429; attempts=4; [429].attempts=2"))
 	if rerr != nil {
 		t.Fatalf("ParseRetryPolicyHeader error: %v", rerr)
 	}

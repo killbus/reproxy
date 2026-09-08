@@ -8,11 +8,13 @@ package reproxy
 // consumes, so the two carriers get Parse's whole validation matrix and error
 // bodies with zero new field rules.
 //
-// The only difference between the carriers is the spelling of scope keys:
-// the header writes [*].attempts / [429].attempts (brackets are legal in
-// header values), the path segment writes *.attempts / 429.attempts
-// (brackets are gen-delims, illegal in path segments). The dotted↔bracketed
-// mapping is a total bijection, locked by tests.
+// The only difference between the carriers is the spelling of status-code
+// scopes: the header writes [429].attempts (brackets are legal in header
+// values), the path segment writes 429.attempts (brackets are gen-delims,
+// illegal in path segments). The dotted↔bracketed mapping is a total
+// bijection on those scopes, locked by tests. The GLOBAL scope has no
+// spelling of its own in either carrier: a bare field IS global
+// (attempts=3), the [*]/*. spellings are dead.
 //
 // This file parses and strips only. Pipeline wiring — carrier resolution,
 // the segment×header mutual exclusion, the single-attempt literal for the
@@ -29,7 +31,7 @@ import (
 // X-Reproxy-* request-header namespace. Its value is a semicolon-separated
 // list of key=value pairs using the policy pair grammar:
 //
-//	X-Reproxy-Retry-Policy: status=5xx; network=1; budget=30s; [*].attempts=3; [429].attempts=5
+//	X-Reproxy-Retry-Policy: status=5xx; network=1; budget=30s; attempts=3; [429].attempts=5
 const RetryPolicyHeader = "X-Reproxy-Retry-Policy"
 
 // reproxyHeaderPrefix marks the reserved request-header namespace for
@@ -66,8 +68,9 @@ type policyCarrier struct {
 //
 // Grammar: pairs separated by ";", optional whitespace around pairs, each
 // pair "key=value" with the key spelled exactly as a policy gate (status,
-// network, budget) or a bracketed scope field ([*].FIELD, [NNN].FIELD).
-// Keys are case-sensitive; values are taken literally (never URL-decoded —
+// network, budget), a bare scope field (FIELD — the global scope, e.g.
+// attempts=3), or a bracketed status-code scope ([NNN].FIELD). Keys are
+// case-sensitive; values are taken literally (never URL-decoded —
 // header values are plain text). No legitimate value needs ";" or "=", so
 // the pair split stays unambiguous (asserted by
 // TestHeaderLegitimateValuesRepresentable).
@@ -142,7 +145,7 @@ func parsePolicyPairList(value string, c policyCarrier) (url.Values, *RequestErr
 	if trimmed == "" {
 		return nil, bad(
 			fmt.Sprintf("policy in the %s is present but empty: an absent policy is the only \"no policy\" spelling", c.name),
-			"send pairs like \"status=5xx; *.attempts=3\" (segment) or \"status=5xx; [*].attempts=3\" (header), or omit the policy entirely",
+			"send pairs like \"status=5xx; attempts=3\" (a bare field IS global), or omit the policy entirely",
 		)
 	}
 
@@ -166,14 +169,14 @@ func parsePolicyPairList(value string, c policyCarrier) (url.Values, *RequestErr
 			}
 			return nil, bad(
 				fmt.Sprintf("malformed policy in the %s: pair %q is not key=value", c.name, pair),
-				"write each pair as key=value, e.g. \"status=5xx; *.attempts=3\"",
+				"write each pair as key=value, e.g. \"status=5xx; attempts=3\"",
 			)
 		}
 		key = strings.TrimSpace(key)
 		if key == "" {
 			return nil, bad(
 				fmt.Sprintf("malformed policy in the %s: pair %q has an empty key", c.name, pair),
-				"keys are status, network, budget, *.FIELD (segment) or [*].FIELD (header), or NNN.FIELD / [NNN].FIELD",
+				"keys are status, network, budget, a bare scope field like attempts (global), or NNN.FIELD / [NNN].FIELD (a status code)",
 			)
 		}
 		// Key shape: total for the header carrier (unknown keys die inside
@@ -198,54 +201,71 @@ func parsePolicyPairList(value string, c policyCarrier) (url.Values, *RequestErr
 }
 
 // queryKeyForHeaderKey maps a header-carrier key to the retry.-prefixed
-// spelling Parse expects. Gates gain the "retry." prefix; scope keys (which
-// begin with "[") gain only "retry": the spelling is "retry[*].attempts",
-// never "retry.[*].attempts". The mapping is total — unknown keys pass
-// through so Parse reports them with its own error body (preserving the
-// header channel's exact 400s).
+// spelling Parse expects. Gates gain the "retry." prefix; a BARE scope
+// field gains "retry[*]." (a bare field IS the global scope); bracketed
+// scope keys (which begin with "[") gain only "retry": the spelling is
+// "retry[429].attempts", never "retry.[429].attempts". Keys that are
+// neither a gate, a bare scope field, nor a bracketed scope pass through
+// so Parse reports them with its own error body (preserving the header
+// channel's exact 400s for unknown fields and bad values).
 func queryKeyForHeaderKey(key string) (string, *RequestError) {
 	if strings.HasPrefix(key, "[") {
-		return "retry" + key, nil
+		if !strings.HasPrefix(key, "[*]") {
+			return "retry" + key, nil
+		}
+		return "", &RequestError{
+			Code:   400,
+			Reason: fmt.Sprintf("unknown policy field %q", key),
+			Hint:   "the global scope has no spelling of its own: a bare field IS global, e.g. \"attempts=3\"; brackets name a status code, e.g. \"[429].attempts=5\"",
+		}
+	}
+	if scopeFields[key] {
+		return "retry[*]." + key, nil
 	}
 	return "retry." + key, nil
 }
 
 // queryKeyForSegmentKey maps a leading-policy-segment key to the
 // retry.-prefixed spelling Parse expects. The segment cannot carry brackets
-// (gen-delims, illegal in path segments), so scopes are dotted:
+// (gen-delims, illegal in path segments), so a status code scope is dotted:
 //
-//	*.FIELD   -> retry[*].FIELD
 //	NNN.FIELD -> retry[NNN].FIELD  (NNN a 3-digit status code)
-//	status    -> retry.status      (gates map as-is)
+//	gate      -> retry.gate        (status, network, budget)
+//	FIELD     -> retry[*].FIELD    (a bare scope field IS the global scope;
+//	                               the "*" spelling is dead)
+//
+// The gate set {status, network, budget} and the scope-field set
+// {attempts, backoff, initial, max, jitter, retry_after} are disjoint, so a
+// bare key's mapping is unambiguous.
 //
 // Unlike the header mapper this one validates key shape EAGERLY: the pair
 // grammar has no place to defer to Parse for key spelling (the segment is
 // parsed before any url.Values exist), and the bare-word rule requires bare
 // words — "retry", "pure", "foo" — to die as the generic unknown-field 400.
-// A malformed dotted scope that is not digits is reported as an unknown
-// policy field too (the field set is closed; there is no other legal
-// interpretation of a dotted key).
+// A malformed dotted scope that is not digits, or the dead "*.FIELD"
+// global spelling, is reported as an unknown policy field too (the field
+// set is closed; there is no other legal interpretation of a dotted key).
 func queryKeyForSegmentKey(key string) (string, *RequestError) {
 	if gateKeys[key] {
 		return "retry." + key, nil
 	}
-	// Scope spelling: SCOPE.FIELD with SCOPE "*" or a 3-digit code.
+	if scopeFields[key] {
+		return "retry[*]." + key, nil
+	}
+	// Scope spelling: NNN.FIELD with NNN a 3-digit code.
 	scope, field, found := strings.Cut(key, ".")
-	if !found || field == "" || scope == "" {
+	if !found || field == "" || scope == "" || scope == "*" {
 		return "", &RequestError{
 			Code:   400,
 			Reason: fmt.Sprintf("unknown policy field %q", key),
-			Hint:   "policy keys are status, network, budget, *.FIELD, or NNN.FIELD (a 3-digit status code), e.g. \"status=5xx; *.attempts=3; 429.attempts=5\"",
+			Hint:   "policy keys are status, network, budget, FIELD (a global scope field like attempts), or NNN.FIELD (a 3-digit status code), e.g. \"status=5xx; attempts=3; 429.attempts=5\"",
 		}
-	}
-	if scope == "*" {
-		return "retry[*]." + field, nil
 	}
 	if len(scope) != 3 || !isDigits(scope) {
 		return "", &RequestError{
 			Code:   400,
 			Reason: fmt.Sprintf("unknown policy field %q", key),
-			Hint:   "policy keys are status, network, budget, *.FIELD, or NNN.FIELD (a 3-digit status code), e.g. \"status=5xx; *.attempts=3; 429.attempts=5\"",
+			Hint:   "policy keys are status, network, budget, FIELD (a global scope field like attempts), or NNN.FIELD (a 3-digit status code), e.g. \"status=5xx; attempts=3; 429.attempts=5\"",
 		}
 	}
 	return "retry[" + scope + "]." + field, nil

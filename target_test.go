@@ -25,7 +25,7 @@ func TestParsePath(t *testing.T) {
 		{"scheme uppercase accepted", "/HTTPS/example.com", PathTarget{"https", "example.com", 0, "/"}, nil, "", ""},
 
 		// --- Leading policy segment (/+POLICY x {http, https}) ---
-		{"policy full https", "/+status=5xx;*.attempts=3;429.attempts=5/https/example.com/x", PathTarget{"https", "example.com", 0, "/x"}, map[string]string{
+		{"policy full https", "/+status=5xx;attempts=3;429.attempts=5/https/example.com/x", PathTarget{"https", "example.com", 0, "/x"}, map[string]string{
 			"retry.status": "5xx", "retry[*].attempts": "3", "retry[429].attempts": "5",
 		}, "", ""},
 		{"policy http with port", "/+network=1;budget=30s/http/h.dev:4000/v1/x", PathTarget{"http", "h.dev", 4000, "/v1/x"}, map[string]string{
@@ -77,6 +77,10 @@ func TestParsePath(t *testing.T) {
 		{"value containing equals", "/+status=429=500/https/example.com/x", PathTarget{}, nil, "contains \"=\"", "values never contain"},
 		{"unknown gate word", "/+attempt=3/https/example.com/x", PathTarget{}, nil, "unknown policy field", "status, network, budget"},
 		{"non-digit scope", "/+42.attempts=2/https/example.com/x", PathTarget{}, nil, "unknown policy field", "status, network, budget"},
+		// --- Dead global spellings: a bare field IS global; "*." / "[*]." have
+		// no referent (v0.5.0, the fifth breaking change). ---
+		{"star scope spelling dead", "/+*.attempts=2/https/example.com/x", PathTarget{}, nil, `unknown policy field "*.attempts"`, "status, network, budget"},
+		{"star scope field dead", "/+status=5xx;*.backoff=linear/https/example.com/x", PathTarget{}, nil, `unknown policy field "*.backoff"`, "status, network, budget"},
 		{"policy without scheme follows", "/+status=5xx", PathTarget{}, nil, "missing upstream scheme", "SCHEME"},
 		{"policy with no scheme after slash", "/+status=5xx/", PathTarget{}, nil, "missing upstream scheme", "SCHEME"},
 
@@ -205,8 +209,8 @@ func TestParsePath(t *testing.T) {
 // leading policy segment (dotted scopes) and the policy header (bracketed
 // scopes) yields the SAME url.Values — one grammar, two carriers.
 func TestParsePathSegmentHeaderGrammarEquivalence(t *testing.T) {
-	segment := "/+status=5xx;network=1;budget=30s;*.attempts=3;429.attempts=5/https/example.com/x"
-	headerVal := "status=5xx; network=1; budget=30s; [*].attempts=3; [429].attempts=5"
+	segment := "/+status=5xx;network=1;budget=30s;attempts=3;429.attempts=5/https/example.com/x"
+	headerVal := "status=5xx; network=1; budget=30s; attempts=3; [429].attempts=5"
 
 	_, viaSegment, rerr := ParsePath(segment)
 	if rerr != nil {
@@ -239,12 +243,12 @@ func TestSegmentBracketBijection(t *testing.T) {
 		headerKey  string
 		queryKey   string
 	}{
-		{"*.attempts", "[*].attempts", "retry[*].attempts"},
-		{"*.backoff", "[*].backoff", "retry[*].backoff"},
-		{"*.initial", "[*].initial", "retry[*].initial"},
-		{"*.max", "[*].max", "retry[*].max"},
-		{"*.jitter", "[*].jitter", "retry[*].jitter"},
-		{"*.retry_after", "[*].retry_after", "retry[*].retry_after"},
+		{"attempts", "attempts", "retry[*].attempts"},
+		{"backoff", "backoff", "retry[*].backoff"},
+		{"initial", "initial", "retry[*].initial"},
+		{"max", "max", "retry[*].max"},
+		{"jitter", "jitter", "retry[*].jitter"},
+		{"retry_after", "retry_after", "retry[*].retry_after"},
 		{"100.attempts", "[100].attempts", "retry[100].attempts"},
 		{"429.attempts", "[429].attempts", "retry[429].attempts"},
 		{"599.attempts", "[599].attempts", "retry[599].attempts"},
@@ -270,7 +274,7 @@ func TestSegmentBracketBijection(t *testing.T) {
 	// Round trip through the full parse for both carriers: each spelling of
 	// the same policy resolves to the same Policy.
 	for _, pair := range [][2]string{
-		{"status=5xx;*.attempts=3", "status=5xx; [*].attempts=3"},
+		{"status=5xx;attempts=3", "status=5xx; attempts=3"},
 		{"status=429,5xx;429.initial=100ms", "status=429,5xx; [429].initial=100ms"},
 	} {
 		_, seg, rerr := ParsePath("/+" + pair[0] + "/https/h")

@@ -62,12 +62,12 @@ POLICY         := pair (";" pair)*   // the shared pair grammar, ORIGINAL bytes,
 ### Request: the two policy carriers (one grammar)
 
 ```
-segment: /+status=5xx;*.attempts=3;429.attempts=5/https/host/path?query
-header:  X-Reproxy-Retry-Policy: status=5xx; [*].attempts=3; [429].attempts=5
+segment: /+status=5xx;attempts=3;429.attempts=5/https/host/path?query
+header:  X-Reproxy-Retry-Policy: status=5xx; attempts=3; [429].attempts=5
 ```
 
 - Both carriers feed the **shared pair grammar** (`parsePolicyPairList`): `key=value` pairs, `;`-separated, whitespace-trimmed (around pairs **and around the `=`**), values never contain `;` or `=`, never URL-decoded. The transform is pure into `retry.`-prefixed `url.Values` consumed by the same `Parse()` — identical validation matrix and 400 bodies, zero new field rules.
-- **Scope-key spelling is the only carrier difference**: the segment writes `*.FIELD` / `NNN.FIELD` (brackets are gen-delims, illegal in path segments); the header writes `[*].FIELD` / `[NNN].FIELD`. The dotted↔bracketed mapping is a total bijection, round-trip locked by tests.
+- **Status-code scope spelling is the only carrier difference**: the segment writes `NNN.FIELD` (brackets are gen-delims, illegal in path segments); the header writes `[NNN].FIELD`. The dotted↔bracketed mapping is a total bijection on those scopes, round-trip locked by tests. The global scope has no spelling of its own in either carrier: a bare field IS global (`attempts=3`); the `*.` / `[*].` spellings are dead (400, v0.5.0).
 - Header mapper is total (unknown keys defer to `Parse`, preserving header error bodies); the segment mapper validates key shape **eagerly** — the bare-word rule below.
 - **Bare-word rule (no legacy detection)**: the KEY is validated BEFORE the `=`-presence check, so `/+retry/https/host`, `/+pure/https/host`, and `/+foo/https/host` all die identically as the generic `unknown policy field` 400. One code path, no mode-word list, no historical branch, no old/legacy/v0.2 in error text. A *recognized* key missing its `=` still hits the fail-closed ladder.
 - Header: one occurrence only (multiple → 400). `X-Reproxy-*` is reserved on every request: unknown member → 400; all members stripped before forwarding upstream.
@@ -133,9 +133,9 @@ built-in defaults -> retry[*].FIELD -> retry[NNN].FIELD
 
 ## 5. Good/Base/Bad Cases
 
-- Good: `/+status=5xx;*.attempts=4;429.attempts=2/https/host/x` — 429 uses attempts=2, everything else in the gate uses 4.
+- Good: `/+status=5xx;attempts=4;429.attempts=2/https/host/x` — 429 uses attempts=2, everything else in the gate uses 4.
 - Good: `/+status=5xx/https/host/x?retry.count=5` — headline property: `retry.count` is target data, reaches the upstream verbatim, policy drives retries.
-- Good: `/https/host` + `X-Reproxy-Retry-Policy: status=5xx; [*].attempts=3` — header policy drives retries, query untouched.
+- Good: `/https/host` + `X-Reproxy-Retry-Policy: status=5xx; attempts=3` — header policy drives retries, query untouched.
 - Good: `/https/host/+x` — the `+` is target data, forwarded verbatim.
 - Base: `/https/host/x?y=1` — pure reverse proxy, single attempt, zero behavioral overhead.
 - Bad: `/+status=429;500.attempts=2/https/host` — 400 dead config (500 not in gate).

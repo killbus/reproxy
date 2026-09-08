@@ -191,7 +191,7 @@ func TestE2ERetryToSuccess(t *testing.T) {
 		_, _ = w.Write([]byte("third time"))
 	}, nil)
 
-	resp := env.get(t, "/+status=500;*.attempts=3;*.initial=1ms;*.max=2ms;*.jitter=none/http/up.example.com/x")
+	resp := env.get(t, "/+status=500;attempts=3;initial=1ms;max=2ms;jitter=none/http/up.example.com/x")
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -220,7 +220,7 @@ func TestE2EExhaustionDeliversLastResponse(t *testing.T) {
 		_, _ = w.Write([]byte(fmt.Sprintf("attempt-%d", k)))
 	}, nil)
 
-	resp := env.get(t, "/+status=500;*.attempts=2;*.initial=1ms;*.max=2ms;*.jitter=none/http/up.example.com/x")
+	resp := env.get(t, "/+status=500;attempts=2;initial=1ms;max=2ms;jitter=none/http/up.example.com/x")
 	if resp.StatusCode != 500 {
 		t.Fatalf("status = %d, want 500 (real upstream verdict)", resp.StatusCode)
 	}
@@ -260,7 +260,7 @@ func TestE2EPOSTBodyReplay(t *testing.T) {
 		_, _ = w.Write([]byte("echo:" + string(b)))
 	}, nil)
 
-	resp := env.doReq(t, "POST", "/+status=500;*.attempts=2;*.initial=1ms;*.max=2ms;*.jitter=none/http/up.example.com/echo",
+	resp := env.doReq(t, "POST", "/+status=500;attempts=2;initial=1ms;max=2ms;jitter=none/http/up.example.com/echo",
 		strings.NewReader("hello world"), nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
@@ -302,7 +302,7 @@ func TestE2EPOSTOversizedDegraded(t *testing.T) {
 	}, cfg)
 
 	body := "0123456789abcdefghij" // 20 bytes > 16-byte cap
-	resp := env.doReq(t, "POST", "/+status=500;*.attempts=3/http/up.example.com/upload",
+	resp := env.doReq(t, "POST", "/+status=500;attempts=3/http/up.example.com/upload",
 		strings.NewReader(body), nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200 (degraded single pass-through)", resp.StatusCode)
@@ -335,7 +335,7 @@ func TestE2EQueryBytePreservation(t *testing.T) {
 		w.WriteHeader(200)
 	}, nil)
 
-	resp := env.get(t, "/+status=500;*.attempts=2/http/up.example.com/p?"+raw)
+	resp := env.get(t, "/+status=500;attempts=2/http/up.example.com/p?"+raw)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -605,7 +605,7 @@ func TestE2EBudgetExhaustion(t *testing.T) {
 	}, nil)
 
 	start := time.Now()
-	resp := env.get(t, "/+status=500;budget=100ms;*.attempts=10;*.initial=5s;*.max=10s;*.jitter=none/http/up.example.com/x")
+	resp := env.get(t, "/+status=500;budget=100ms;attempts=10;initial=5s;max=10s;jitter=none/http/up.example.com/x")
 	elapsed := time.Since(start)
 	defer bodyString(t, resp)
 
@@ -693,7 +693,7 @@ func TestE2ESegmentPolicyPassthroughQueryUntouched(t *testing.T) {
 		_, _ = w.Write([]byte("second works"))
 	}, nil)
 
-	resp := env.get(t, "/+status=500;*.attempts=2;*.initial=1ms;*.max=2ms;*.jitter=none/http/up.example.com/x?target_param=yes")
+	resp := env.get(t, "/+status=500;attempts=2;initial=1ms;max=2ms;jitter=none/http/up.example.com/x?target_param=yes")
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -727,7 +727,7 @@ func TestE2EPlainHeaderPolicy(t *testing.T) {
 	}, nil)
 
 	hdr := http.Header{}
-	hdr.Set(RetryPolicyHeader, "status=5xx; [*].initial=1ms; [*].max=2ms; [*].jitter=none")
+	hdr.Set(RetryPolicyHeader, "status=5xx; initial=1ms; max=2ms; jitter=none")
 	resp := env.doReq(t, "GET", "/http/up.example.com/x?"+raw, nil, hdr)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200 (header policy retried the 500)", resp.StatusCode)
@@ -872,7 +872,7 @@ func TestE2EPlainHeaderPolicyBodyReplayE2E(t *testing.T) {
 	}, nil)
 
 	hdr := http.Header{}
-	hdr.Set(RetryPolicyHeader, "status=5xx; [*].initial=1ms; [*].max=2ms; [*].jitter=none")
+	hdr.Set(RetryPolicyHeader, "status=5xx; initial=1ms; max=2ms; jitter=none")
 	resp := env.doReq(t, "POST", "/http/up.example.com/echo?retry.count=1", strings.NewReader("the same payload"), hdr)
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200 (header policy + captured body replayed)", resp.StatusCode)

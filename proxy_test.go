@@ -113,7 +113,7 @@ func TestProxyRetriesStatusSequence(t *testing.T) {
 	)
 	p := testProxy(mt, nil)
 
-	w := do(p, "GET", "/+status=500;*.initial=1ms;*.max=2ms;*.jitter=none/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+status=500;initial=1ms;max=2ms;jitter=none/http/up.example.com/x", nil, nil)
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
@@ -138,7 +138,7 @@ func TestProxyNoRetryWithoutStatusGate(t *testing.T) {
 	mt := newMockTransport(mockResult{resp: respFor(500, "boom", nil)})
 	p := testProxy(mt, nil)
 
-	w := do(p, "GET", "/+*.attempts=3/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+attempts=3/http/up.example.com/x", nil, nil)
 	if w.Code != 500 {
 		t.Fatalf("status = %d, want 500", w.Code)
 	}
@@ -159,7 +159,7 @@ func TestProxyNetworkErrorRetry(t *testing.T) {
 	)
 	p := testProxy(mt, nil)
 
-	w := do(p, "GET", "/+network=1;*.initial=1ms;*.max=2ms;*.jitter=none/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+network=1;initial=1ms;max=2ms;jitter=none/http/up.example.com/x", nil, nil)
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
@@ -196,7 +196,7 @@ func TestProxyExhaustedDeliversLastResponse(t *testing.T) {
 	)
 	p := testProxy(mt, nil)
 
-	w := do(p, "GET", "/+status=503;*.attempts=3;*.initial=1ms;*.max=2ms;*.jitter=none/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+status=503;attempts=3;initial=1ms;max=2ms;jitter=none/http/up.example.com/x", nil, nil)
 	if w.Code != 503 {
 		t.Fatalf("status = %d, want 503 (last response delivered)", w.Code)
 	}
@@ -223,7 +223,7 @@ func TestProxyNetworkExhaustion504(t *testing.T) {
 	)
 	p := testProxy(mt, nil)
 
-	w := do(p, "GET", "/+*.attempts=2;*.initial=1ms;*.max=2ms;*.jitter=none/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+attempts=2;initial=1ms;max=2ms;jitter=none/http/up.example.com/x", nil, nil)
 	if w.Code != 504 {
 		t.Fatalf("status = %d, want 504", w.Code)
 	}
@@ -247,7 +247,7 @@ func TestProxyBudgetExhaustion(t *testing.T) {
 	p := testProxy(mt, cfg)
 
 	start := time.Now()
-	w := do(p, "GET", "/+*.initial=30s;*.max=60s;*.jitter=none/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+initial=30s;max=60s;jitter=none/http/up.example.com/x", nil, nil)
 	elapsed := time.Since(start)
 	if w.Code != 504 {
 		t.Fatalf("status = %d, want 504", w.Code)
@@ -399,7 +399,7 @@ func TestProxyQueryBytePreservation(t *testing.T) {
 	p := testProxy(mt, nil)
 
 	raw := "a=%2Fpath%20with%20space&b=plus+sign&c&d=&e=1&e=2&f=%E4%B8%AD"
-	w := do(p, "GET", "/+status=500;*.attempts=2/http/up.example.com/p?"+raw, nil, nil)
+	w := do(p, "GET", "/+status=500;attempts=2/http/up.example.com/p?"+raw, nil, nil)
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
@@ -422,7 +422,7 @@ func TestProxyDegradedBodyPassthrough(t *testing.T) {
 	cfg := &ServerConfig{MaxAttempts: 10, MaxBudget: 5 * time.Second, MaxBody: 8, DangerousAllowAll: true}
 	p := testProxy(mt, cfg)
 
-	w := do(p, "POST", "/+status=500;*.attempts=3/http/up.example.com/x", strings.NewReader("0123456789"), nil)
+	w := do(p, "POST", "/+status=500;attempts=3/http/up.example.com/x", strings.NewReader("0123456789"), nil)
 	if w.Code != 500 {
 		t.Fatalf("status = %d, want 500 (single pass-through)", w.Code)
 	}
@@ -494,7 +494,7 @@ func TestProxyBodyReplayedAcrossRetries(t *testing.T) {
 	rt := &bodyRecordingTransport{inner: mt}
 	p := testProxy(rt, nil)
 
-	w := do(p, "POST", "/+status=500;*.initial=1ms;*.jitter=none/http/up.example.com/x", strings.NewReader("payload-123"), nil)
+	w := do(p, "POST", "/+status=500;initial=1ms;jitter=none/http/up.example.com/x", strings.NewReader("payload-123"), nil)
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
@@ -538,7 +538,7 @@ func TestProxyRetryAfterHonored(t *testing.T) {
 	p := testProxy(mt, nil)
 
 	start := time.Now()
-	w := do(p, "GET", "/+status=429;*.retry_after=honor;*.jitter=none/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+status=429;retry_after=honor;jitter=none/http/up.example.com/x", nil, nil)
 	elapsed := time.Since(start)
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -565,7 +565,7 @@ func TestProxyRetryAfterCappedByBudget(t *testing.T) {
 	p := testProxy(mt, cfg)
 
 	start := time.Now()
-	w := do(p, "GET", "/+status=429;*.retry_after=honor/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+status=429;retry_after=honor/http/up.example.com/x", nil, nil)
 	elapsed := time.Since(start)
 	if w.Code != 429 {
 		t.Fatalf("status = %d, want 429 (exhausted, last response delivered)", w.Code)
@@ -589,7 +589,7 @@ func TestProxyRetryAfterIgnored(t *testing.T) {
 	p := testProxy(mt, nil)
 
 	start := time.Now()
-	w := do(p, "GET", "/+status=429;*.retry_after=ignore;*.initial=1ms;*.max=2ms;*.jitter=none/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+status=429;retry_after=ignore;initial=1ms;max=2ms;jitter=none/http/up.example.com/x", nil, nil)
 	elapsed := time.Since(start)
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -706,7 +706,7 @@ func TestProxyCommitPointNoRetryAfterHeaders(t *testing.T) {
 	// write (mirroring httputil.ReverseProxy); do() recovers it so the
 	// recorder's committed state can be inspected. 200 is NOT in the gate:
 	// headers commit immediately, then the body read fails mid-stream.
-	w := do(p, "GET", "/+status=500;*.attempts=3;*.initial=1ms;*.jitter=none/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+status=500;attempts=3;initial=1ms;jitter=none/http/up.example.com/x", nil, nil)
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200 (already committed)", w.Code)
 	}
@@ -861,7 +861,7 @@ func TestProxyIntegrationRetryAgainstRealUpstream(t *testing.T) {
 		Resolver:  pr,
 	}
 
-	w := do(p, "GET", "/+status=500;*.initial=5ms;*.max=10ms;*.jitter=none/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+status=500;initial=5ms;max=10ms;jitter=none/http/up.example.com/x", nil, nil)
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200 (third attempt)", w.Code)
 	}
@@ -919,7 +919,7 @@ func TestProxyTTFBTimeoutRetryable(t *testing.T) {
 	}
 
 	start := time.Now()
-	w := do(p, "GET", "/+*.initial=5ms;*.max=10ms;*.jitter=none/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+initial=5ms;max=10ms;jitter=none/http/up.example.com/x", nil, nil)
 	elapsed := time.Since(start)
 	if w.Code != 504 {
 		t.Fatalf("status = %d, want 504 (TTFB hangs exhausted)", w.Code)
@@ -946,7 +946,7 @@ func TestProxyRetryAfterHTTPDate(t *testing.T) {
 	p := testProxy(mt, nil)
 
 	start := time.Now()
-	w := do(p, "GET", "/+status=429;*.retry_after=honor/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+status=429;retry_after=honor/http/up.example.com/x", nil, nil)
 	elapsed := time.Since(start)
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -969,7 +969,7 @@ func TestProxyRetryAfterPastDate(t *testing.T) {
 	p := testProxy(mt, nil)
 
 	start := time.Now()
-	w := do(p, "GET", "/+status=429;*.retry_after=honor/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+status=429;retry_after=honor/http/up.example.com/x", nil, nil)
 	elapsed := time.Since(start)
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -1018,7 +1018,7 @@ func TestProxyClientDisconnectDuringWait(t *testing.T) {
 	p := testProxy(mt, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	req := httptest.NewRequest("GET", "/+status=500;*.initial=500ms;*.jitter=none/http/up.example.com/x", nil).WithContext(ctx)
+	req := httptest.NewRequest("GET", "/+status=500;initial=500ms;jitter=none/http/up.example.com/x", nil).WithContext(ctx)
 	w := httptest.NewRecorder()
 
 	done := make(chan struct{})
@@ -1109,7 +1109,7 @@ func TestProxyPerStatusScopeShaping(t *testing.T) {
 	p := testProxy(mt, nil)
 
 	start := time.Now()
-	w := do(p, "GET", "/+status=429,500;429.initial=1ms;429.max=2ms;*.initial=300ms;*.jitter=none/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+status=429,500;429.initial=1ms;429.max=2ms;initial=300ms;jitter=none/http/up.example.com/x", nil, nil)
 	elapsed := time.Since(start)
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -1129,7 +1129,7 @@ func TestProxyStatusScopeRaisesLimit(t *testing.T) {
 	)
 	p := testProxy(mt, nil)
 
-	w := do(p, "GET", "/+status=500;*.attempts=2;500.attempts=3;*.initial=1ms;*.jitter=none/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+status=500;attempts=2;500.attempts=3;initial=1ms;jitter=none/http/up.example.com/x", nil, nil)
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
@@ -1150,7 +1150,7 @@ func TestProxyStatusGateClassShorthand(t *testing.T) {
 			mockResult{resp: respFor(200, "ok", nil)},
 		)
 		p := testProxy(mt, nil)
-		w := do(p, "GET", "/+status=5xx;*.initial=1ms;*.jitter=none/http/up.example.com/x", nil, nil)
+		w := do(p, "GET", "/+status=5xx;initial=1ms;jitter=none/http/up.example.com/x", nil, nil)
 		if w.Code != 200 {
 			t.Errorf("%d not retried under 5xx gate: status = %d", status, w.Code)
 		}
@@ -1166,7 +1166,7 @@ func TestProxyOnlyRetryParams(t *testing.T) {
 	mt := newMockTransport(mockResult{resp: respFor(200, "ok", nil)})
 	p := testProxy(mt, nil)
 
-	w := do(p, "GET", "/+status=500;*.attempts=2/http/up.example.com/x", nil, nil)
+	w := do(p, "GET", "/+status=500;attempts=2/http/up.example.com/x", nil, nil)
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
@@ -1185,7 +1185,7 @@ func TestProxySegmentPolicyQueryIsTargetData(t *testing.T) {
 	)
 	p := testProxy(mt, nil)
 
-	w := do(p, "GET", "/+status=5xx;*.attempts=3/https/up.example.com/x?retry.count=5", nil, nil)
+	w := do(p, "GET", "/+status=5xx;attempts=3/https/up.example.com/x?retry.count=5", nil, nil)
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200 (policy drove a retry)", w.Code)
 	}
@@ -1640,7 +1640,7 @@ func TestProxyPlainHeaderPolicyRetries(t *testing.T) {
 	)
 	p := testProxy(mt, nil)
 	hdr := http.Header{}
-	hdr.Set(RetryPolicyHeader, "status=5xx; [*].initial=1ms; [*].max=2ms; [*].jitter=none")
+	hdr.Set(RetryPolicyHeader, "status=5xx; initial=1ms; max=2ms; jitter=none")
 
 	w := do(p, "GET", "/https/up.example.com/x?"+raw, nil, hdr)
 	if w.Code != 200 {
@@ -1689,7 +1689,7 @@ func TestProxyPlainHeaderPolicyCapturesBody(t *testing.T) {
 	)
 	p := testProxy(mt, &ServerConfig{MaxAttempts: 10, MaxBudget: 5 * time.Second, MaxBody: 8, DangerousAllowAll: true})
 	hdr := http.Header{}
-	hdr.Set(RetryPolicyHeader, "status=5xx; [*].attempts=3")
+	hdr.Set(RetryPolicyHeader, "status=5xx; attempts=3")
 
 	w := do(p, "POST", "/https/up.example.com/x", strings.NewReader("0123456789"), hdr)
 	if w.Code != 500 {
@@ -1722,7 +1722,7 @@ func TestProxyPlainHeaderPolicyBodyReplayed(t *testing.T) {
 	rt := &bodyRecordingTransport{inner: mt}
 	p := testProxy(rt, nil)
 	hdr := http.Header{}
-	hdr.Set(RetryPolicyHeader, "status=5xx; [*].initial=1ms; [*].jitter=none")
+	hdr.Set(RetryPolicyHeader, "status=5xx; initial=1ms; jitter=none")
 
 	w := do(p, "POST", "/https/up.example.com/x", strings.NewReader("payload-123"), hdr)
 	if w.Code != 200 {
@@ -1823,7 +1823,7 @@ func TestProxyPlainSchemeHeaderPolicyRetries(t *testing.T) {
 	)
 	p := testProxy(mt, nil)
 	hdr := http.Header{}
-	hdr.Set(RetryPolicyHeader, "status=5xx; [*].initial=1ms; [*].max=2ms; [*].jitter=none")
+	hdr.Set(RetryPolicyHeader, "status=5xx; initial=1ms; max=2ms; jitter=none")
 
 	w := do(p, "GET", "/http/up.example.com/x?"+raw, nil, hdr)
 	if w.Code != 200 {
