@@ -13,7 +13,7 @@
 
 services:
   reproxy:
-    image: ghcr.io/killbus/reproxy:v0.4.1   # pinned version; immutable tag
+    image: ghcr.io/killbus/reproxy:v0.5.0   # pinned version; immutable tag
     command: ["--allowlist", "api.example.com"]
     ports:
       - "8080:8080"
