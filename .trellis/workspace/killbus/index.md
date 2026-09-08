@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 5
-- **Last Active**: 2026-09-07
+- **Total Sessions**: 6
+- **Last Active**: 2026-09-08
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~153 | Active |
+| `journal-1.md` | ~176 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 6 | 2026-09-08 | Multi-arch images via native runners (v0.4.1) | `27f114f`, `52bb39b` | `main` |
 | 5 | 2026-09-07 | v0.4.0: leading +POLICY segment — scheme returns to pure target | `51da285` | `main` |
 | 4 | 2026-09-07 | Docker smoke extraction: contract gets an address in the repo | `6284f20` | `main` |
 | 3 | 2026-09-04 | Project close-out: bootstrap spec completion, CI, v0.1.0, scaffold tracking | `9b39e94`, `64d9839`, `7a2132f`, `22531f9` | `main` |

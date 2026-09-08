@@ -151,3 +151,26 @@ Executed the R8 convergence end-to-end. Implement agent (6 units, incremental pe
 ### Status
 
 [OK] **Completed**
+
+
+## Session 6: Multi-arch images via native runners (v0.4.1)
+<!-- trellis-session: v=2 fp=e4703b5bb549067a -->
+
+**Date**: 2026-09-08
+**Task**: Multi-arch images via native runners (v0.4.1)
+**Branch**: `main`
+
+### Summary
+
+Owner challenge exposed the R6 kill-list defect: the arm64 wait-signal was self-referential (nobody can pull an image that was never published) and its cost premise was stale (free arm64 hosted runners for public repos since 2025-01; CGO=0 cross-compile needs no QEMU) — plus a mis-bucket: arm is build-matrix breadth with real hardware audience, not verification infrastructure. Second same-shape chatroom failure after R7's straw-man (stale facts + unexamined signal design, caught both times by the owner). Direct-to-task per owner's 快速推进 (no chatroom round — defect verified, design single-mechanism). Dockerfile: FROM --platform=BUILDPLATFORM + TARGETARCH/GOARCH cross-compile, human path unchanged native. Workflow: fixed 2-entry matrix of NATIVE runners (ubuntu-latest/amd64, ubuntu-24.04-arm/arm64), each leg loads + smokes the UNCHANGED scripts/docker-smoke.sh against its own arch (extraction payoff cashed), pushes by digest only; merge job assembles the manifest list with imagetools create and applies event-keyed tags only after both arches green — smoke-before-pullable extended to the merged artifact. Check agent re-derived every risky mechanism from primary sources (actions/runner lexer, toolkit 0.92.0, buildx create, registry APIs incl. distroless arm64 base): READY-FOR-DISPATCH zero defects. Dispatch run 34177555204: both arch legs fully smoked, merge green, dispatch-test = OCI index with exactly 2 platform children. Tag v0.4.1: release run green (banner exact both arches), v0.4.1 + latest both dual-platform manifest lists, CI green. Release published; compose/README pins at v0.4.1. Kill list updated: multi-arch shipped OFF the list; QEMU/caches/extra-arches stay dead.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `27f114f` | feat(docker): multi-arch images — linux/amd64 + linux/arm64 via native runners |
+| `52bb39b` | chore(docker): bump compose/README image pins to v0.4.1 |
+
+### Status
+
+[OK] **Completed**
