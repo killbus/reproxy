@@ -29,8 +29,8 @@ is passed (see [Security](#security)).
 
 ## Docker
 
-A prebuilt image is published at `ghcr.io/killbus/reproxy` (distroless-based,
-non-root, single static binary). One-liner:
+A prebuilt multi-arch image is published at `ghcr.io/killbus/reproxy`
+(distroless-based, non-root, single static binary). One-liner:
 
 ```sh
 docker run --rm -p 8080:8080 ghcr.io/killbus/reproxy:latest \
@@ -52,6 +52,22 @@ The image is `gcr.io/distroless/static-debian13:nonroot` (not `scratch`)
 because reproxy makes outbound HTTPS connections with certificate
 validation — a bare scratch image has no CA roots and the first `https`
 upstream would fail.
+
+### Architectures
+
+| Tag range | linux/amd64 | linux/arm64 |
+|---|---|---|
+| `v0.4.1` and later | yes | yes |
+| `v0.4.0` and earlier | yes | no (amd64-only) |
+
+Since v0.4.1 the published tags are multi-arch manifest lists — the same
+`docker run ghcr.io/killbus/reproxy:v0.4.1` works on x86-64 and ARM
+(M-series Macs, Graviton, Raspberry Pi 4+) with no platform flag, because
+Docker resolves the architecture from the manifest list. Earlier tags are
+amd64-only and stay that way (version tags are immutable — see below);
+v0.4.0 and earlier never gain arm64. The CI builds each architecture on
+its own native runner (no emulation); nothing about the image format
+differs between architectures.
 
 ### Tag semantics
 
@@ -82,6 +98,13 @@ The local image reports `--version` as `dev`; inject a version with
 ```sh
 docker build -t reproxy:local . && scripts/docker-smoke.sh reproxy:local dev
 ```
+
+A plain `docker build` always produces a **native** image for the machine
+building it: the Dockerfile pins the build stage to the build machine's
+platform and selects the target architecture through `GOARCH`, so asking
+for another architecture cross-compiles instead of emulating —
+`docker buildx build --platform linux/arm64 -t reproxy:local-arm64 .`
+builds an arm64 image on an amd64 machine (and vice versa) with no QEMU.
 
 The compose local-build variant replaces
 `image:` with `build: .`:

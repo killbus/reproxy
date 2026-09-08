@@ -5,13 +5,30 @@
 #
 # VERSION is injected into the binary via -ldflags and reported by
 # `reproxy --version` (default "dev" when unstamped).
+#
+# Multi-arch without emulation: the builder stage always runs on the build
+# MACHINE's platform (--platform=$BUILDPLATFORM) and produces the TARGET
+# architecture through GOARCH. A plain `docker build` passes no platform,
+# so TARGETARCH defaults to the build machine's architecture — a native
+# build, zero behavior change for humans. Asking for another platform
+# (docker buildx build --platform linux/arm64 .) cross-compiles instead of
+# emulating: CGO is off, so no cross C toolchain is needed. CI exploits the
+# same property by building each architecture on its own native runner.
 
 # --- build stage ---------------------------------------------------------
 # golang:<major.minor> must match go.mod (go 1.25.1). Patch-level variants
 # of the builder image are interchangeable; major.minor is the contract.
-FROM golang:1.25 AS builder
+# --platform=$BUILDPLATFORM pulls the builder for the machine RUNNING the
+# build, not for the target — that is what keeps a foreign-architecture
+# build off emulation.
+FROM --platform=$BUILDPLATFORM golang:1.25 AS builder
 
 ARG VERSION=dev
+
+# Re-expose BuildKit's automatic target-architecture arg (automatic platform
+# args are global-scope; a stage must redeclare them to use them). With no
+# --platform requested, TARGETARCH is the build machine's arch — native.
+ARG TARGETARCH
 
 WORKDIR /src
 
@@ -19,9 +36,11 @@ WORKDIR /src
 # is warranted; the source arrives in one COPY).
 COPY . .
 
-# CGO_ENABLED=0: static binary, the only kind a distroless runtime can run.
-# -trimpath: no absolute paths of the build host in the binary.
-RUN CGO_ENABLED=0 go build \
+# CGO_ENABLED=0: static binary, the only kind a distroless runtime can run —
+# and the enabler of GOARCH-only cross-compilation (nothing to emulate, no
+# cross C toolchain to build). -trimpath: no absolute paths of the build
+# host in the binary.
+RUN CGO_ENABLED=0 GOARCH=${TARGETARCH} go build \
     -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/reproxy \

@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Dockerfile/scripts/workflow layout conventions; the one-build-path principle (humans and CI share the Dockerfile) must survive the multi-arch change"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Mutation/evidence discipline for infra changes; smoke-before-push ordering is a pinned product guarantee"}

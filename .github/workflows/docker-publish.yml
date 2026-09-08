@@ -1,4 +1,4 @@
-# Build, smoke-test, and publish the reproxy Docker image to GHCR.
+# Build, smoke-test, and publish the multi-arch reproxy Docker image to GHCR.
 #
 # Triggers:
 #   - push of a v* tag   -> build + smoke + publish ghcr.io/killbus/reproxy:<tag>
@@ -10,13 +10,29 @@
 #                           never be publishable as a release artifact.
 #
 # One build path: the same Dockerfile humans run locally (no drift between
-# local and CI builds).
+# local and CI builds). The Dockerfile cross-compiles (GOARCH), so each
+# architecture is built on its own NATIVE runner (amd64 on ubuntu-latest,
+# arm64 on ubuntu-24.04-arm) — no QEMU anywhere in this file.
+#
+# Publish ordering — nothing pullable by tag exists until BOTH arches'
+# smokes pass:
+#   1. each build job builds its arch, loads it, runs the unchanged
+#      scripts/docker-smoke.sh against it, and only then pushes the image
+#      BY DIGEST ONLY (`outputs: type=image,push-by-digest=true` — an
+#      untagged digest is not pullable by name);
+#   2. the merge job (needs: build) combines both arch digests into ONE
+#      manifest list with `docker buildx imagetools create` and applies the
+#      tags. A failed smoke on either arch fails that build job, which
+#      fails the merge job — no tag is ever created.
 #
 # Deliberately absent (kill list — revisit only on a real signal):
-#   multi-arch/platforms, cosign, SBOM, vulnerability scanning, cache
-#   mounts / cache-from / cache-to. The image is amd64-only (first arm64
-#   pull request is the signal to add platforms); zero Go dependencies and
-#   tag-frequency builds leave nothing for caches to hold.
+#   cosign, SBOM, vulnerability scanning, cache mounts / cache-from /
+#   cache-to, QEMU/emulation, architectures beyond amd64+arm64 (each
+#   further arch waits for its own signal). Multi-arch itself is NO LONGER
+#   on this list — it shipped (v0.4.1 is the first multi-arch tag; v0.4.0
+#   and earlier are amd64-only forever — tags supersede, never rewrite).
+#   Zero Go dependencies and tag-frequency builds leave nothing for caches
+#   to hold.
 
 name: docker-publish
 
@@ -34,8 +50,30 @@ env:
   IMAGE: ghcr.io/killbus/reproxy
 
 jobs:
-  build-and-publish:
-    runs-on: ubuntu-latest
+  build:
+    # Two NATIVE jobs: each matrix leg builds for its own runner's
+    # architecture (the Dockerfile cross-compiles via GOARCH with the
+    # builder stage pinned to the runner's platform). A fixed 2-entry
+    # matrix — not a workflow input; adding an architecture is a workflow
+    # edit, not a knob. `arch` is bookkeeping for the per-leg job output
+    # key below, nothing else.
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    # Per-arch output keys. Each matrix leg writes ONLY its own key
+    # (docs: matrix job outputs are combined across legs; identically-named
+    # outputs race with last-writer-wins, so the keys are disjoint and each
+    # leg's export step emits just one).
+    outputs:
+      digest-amd64: ${{ steps.export.outputs.digest-amd64 }}
+      digest-arm64: ${{ steps.export.outputs.digest-arm64 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -50,7 +88,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute version and image tags
+      - name: Compute version
         id: meta
         run: |
           # Key on the EVENT, not the ref type: this workflow's push
@@ -59,6 +97,113 @@ jobs:
           # dispatch path (the test channel never publishes a release).
           # Tag push: the version IS the tag. Dispatch: a run-qualified
           # string that can never collide with a release tag.
+          # Tags are decided in the merge job; a build job only needs the
+          # version string (for -ldflags and the smoke banner check).
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="dev-run${GITHUB_RUN_NUMBER}-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image (loaded locally for smoke tests)
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          platforms: ${{ matrix.platform }}
+          tags: reproxy:smoke-${{ matrix.arch }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+          # OCI annotations: revision = commit SHA, version = injected
+          # version string, source = repo URL. They land on this arch's
+          # image manifest (same placement as every release to date).
+          # Kept identical to the push step below so the second build is
+          # a cache hit (annotations are part of the manifest bytes).
+          annotations: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+
+      # ---- Smoke tests: the pinned failure mode. The image's version must
+      # not lie, and the binary must actually proxy. Push happens only after
+      # the smoke script passes. The checks live in scripts/docker-smoke.sh
+      # (the repo, not a CI template, owns the product contracts); this
+      # step is only their CI caller. On the arm64 leg this exercises the
+      # arm64 binary end-to-end (CA handshake included) on real hardware.
+      # ----
+
+      - name: Smoke - version banner, round-trip, compose (scripts/docker-smoke.sh)
+        env:
+          # Env, never template interpolation into the shell line: a tag
+          # name with shell metacharacters must never become code.
+          SMOKE_IMAGE: reproxy:smoke-${{ matrix.arch }}
+          EXPECTED_VERSION: ${{ steps.meta.outputs.version }}
+        run: scripts/docker-smoke.sh "${SMOKE_IMAGE}" "${EXPECTED_VERSION}"
+
+      - name: Push image by digest only (no pullable tag)
+        # The smoke gate has passed on this arch. Push the image under
+        # its digest ONLY: `outputs: type=image,push-by-digest=true`
+        # pushes ghcr.io/killbus/reproxy@sha256:<digest> with no tag, so
+        # nothing is pullable by name until the merge job runs (which
+        # needs BOTH arches' smoke to pass). No `tags:` input on purpose —
+        # a tag here would be pullable before the other arch finished
+        # smoking.
+        id: push
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+          annotations: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+
+      - name: Export digest to per-arch job output
+        # Map the action's digest output (already sha256:-prefixed) onto
+        # this leg's arch-keyed job output. One key per leg — see the
+        # outputs: comment above.
+        id: export
+        env:
+          ARCH: ${{ matrix.arch }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: echo "digest-${ARCH}=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout for the dispatch path's version string
+      # (dev-run<N>-<short SHA>).
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      # imagetools create's --annotation flag needs a current buildx
+      # plugin; setup-buildx installs it (and nothing in this job builds,
+      # so no builder is exercised).
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute version and image tags
+        id: meta
+        run: |
+          # SAME event-keyed logic as the build jobs: push means a v* tag
+          # push (version = the tag, publish <tag> + latest); dispatch
+          # means the test channel (dispatch-test only — a dispatch build
+          # must never be publishable as a release artifact, even when
+          # dispatched on a tag ref).
           if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
             version="${GITHUB_REF_NAME}"
             tags="${IMAGE}:${version}
@@ -74,51 +219,42 @@ jobs:
             echo "TAGS_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build image (loaded locally for smoke tests)
-        uses: docker/build-push-action@v7.3.0
-        with:
-          context: .
-          file: ./Dockerfile
-          load: true
-          tags: ${{ steps.meta.outputs.tags }}
-          build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
-          # OCI annotations: revision = commit SHA, version = injected
-          # version string, source = repo URL.
-          annotations: |
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-            org.opencontainers.image.source=${{ github.repositoryUrl }}
-
-      # ---- Smoke tests: the pinned failure mode. The image's version must
-      # not lie, and the binary must actually proxy. Push happens only after
-      # the smoke script passes. The checks live in scripts/docker-smoke.sh
-      # (the repo, not a CI template, owns the product contracts); this
-      # step is only their CI caller. ----
-
-      - name: Smoke - version banner, round-trip, compose (scripts/docker-smoke.sh)
+      - name: Create manifest list and push
+        # Both build legs are green (needs: build) — both arches built,
+        # smoked, and pushed their untagged digests. Combine them into a
+        # single manifest list and apply the tags. Index-typed sources are
+        # flattened by imagetools create (their child manifests are re-
+        # added to the new index), so each arch's provenance attestation
+        # rides along next to its image manifest.
         env:
           # Env, never template interpolation into the shell line: a tag
-          # name with shell metacharacters must never become code.
-          SMOKE_IMAGE: ${{ steps.meta.outputs.tags }}
-          EXPECTED_VERSION: ${{ steps.meta.outputs.version }}
+          # name with shell metacharacters must never become code. The
+          # here-string below expands TAGS once; its value is not
+          # re-parsed by the shell.
+          TAGS: ${{ steps.meta.outputs.tags }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          REPO_URL: ${{ github.repositoryUrl }}
+          DIGEST_AMD64: ${{ needs.build.outputs.digest-amd64 }}
+          DIGEST_ARM64: ${{ needs.build.outputs.digest-arm64 }}
         run: |
-          first_tag="$(echo "${SMOKE_IMAGE}" | head -n1)"
-          scripts/docker-smoke.sh "${first_tag}" "${EXPECTED_VERSION}"
+          tag_args=()
+          while IFS= read -r tag; do
+            # if-form, not `[[ ]] &&`: run steps execute under bash -e, and
+            # a short-circuited `&&` list leaves a non-zero status behind
+            # (the same reason scripts/docker-smoke.sh probes readiness
+            # inside if-conditions).
+            if [[ -n "${tag}" ]]; then
+              tag_args+=( -t "${tag}" )
+            fi
+          done <<< "${TAGS}"
 
-      - name: Push image
-        uses: docker/build-push-action@v7.3.0
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
-          annotations: |
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-            org.opencontainers.image.source=${{ github.repositoryUrl }}
+          docker buildx imagetools create \
+            "${tag_args[@]}" \
+            --annotation "index:org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --annotation "index:org.opencontainers.image.version=${VERSION}" \
+            --annotation "index:org.opencontainers.image.source=${REPO_URL}" \
+            "${IMAGE}@${DIGEST_AMD64}" \
+            "${IMAGE}@${DIGEST_ARM64}"
 
       # Note on the dispatch path: it pushes only ghcr.io/killbus/reproxy:dispatch-test,
       # which every dispatch overwrites — no cleanup step is needed and none

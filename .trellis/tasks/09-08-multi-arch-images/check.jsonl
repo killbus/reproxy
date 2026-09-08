@@ -1,0 +1,1 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Check agent verifies one-build-path survival, smoke-before-push ordering, and no new knobs"}
