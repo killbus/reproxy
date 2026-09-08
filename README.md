@@ -42,7 +42,7 @@ Or as a compose file (`docker compose up -d`):
 ```yaml
 services:
   reproxy:
-    image: ghcr.io/killbus/reproxy:v0.4.0   # pinned version
+    image: ghcr.io/killbus/reproxy:v0.4.1   # pinned version
     command: ["--allowlist", "api.example.com"]
     ports: ["8080:8080"]
     restart: unless-stopped
@@ -81,7 +81,7 @@ differs between architectures.
   from; `dev` for local builds):
 
 ```sh
-docker run --rm ghcr.io/killbus/reproxy:v0.4.0 --version
+docker run --rm ghcr.io/killbus/reproxy:v0.4.1 --version
 ```
 
 ### Building locally
