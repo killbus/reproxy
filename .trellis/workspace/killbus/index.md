@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 6
+- **Total Sessions**: 7
 - **Last Active**: 2026-09-08
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~176 | Active |
+| `journal-1.md` | ~199 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 7 | 2026-09-08 | v0.5.0: global scope is a bare field | `4f080a7`, `e43293d` | `main` |
 | 6 | 2026-09-08 | Multi-arch images via native runners (v0.4.1) | `27f114f`, `52bb39b` | `main` |
 | 5 | 2026-09-07 | v0.4.0: leading +POLICY segment — scheme returns to pure target | `51da285` | `main` |
 | 4 | 2026-09-07 | Docker smoke extraction: contract gets an address in the repo | `6284f20` | `main` |

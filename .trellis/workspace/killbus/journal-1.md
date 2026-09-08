@@ -174,3 +174,26 @@ Owner challenge exposed the R6 kill-list defect: the arm64 wait-signal was self-
 ### Status
 
 [OK] **Completed**
+
+
+## Session 7: v0.5.0: global scope is a bare field
+<!-- trellis-session: v=2 fp=01b3dcc8cddead6a -->
+
+**Date**: 2026-09-08
+**Task**: v0.5.0: global scope is a bare field
+**Branch**: `main`
+
+### Summary
+
+Fifth breaking change: killed the "*."/"[*]." global-scope spellings — a bare field IS global (attempts=3), exactly as gates have always been bare. Rationale: gate set and scope-field set are disjoint (no disambiguation power) and a global qualifier names nothing checkable (unlike NNN, which powers dead-config detection). Direct implementation without a Trellis task per owner instruction. Both carriers' mappers updated (bare scope fields -> retry[*].FIELD; dead spellings 400 at the pair layer); Parse() internal shape untouched. 405 tests green, vet+gofmt clean. Tag v0.5.0: multi-arch images published and verified (2 platforms + 2 attestations per index, version annotation, anonymous pull); compose/README pins bumped; GitHub Release published; README + retry-proxy-contract.md spellings synced.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4f080a7` | feat(grammar): the global scope is a bare field — kill the "*."/"[*]." spellings |
+| `e43293d` | chore(docker): bump compose/README image pins to v0.5.0 |
+
+### Status
+
+[OK] **Completed**
